@@ -18,8 +18,10 @@ id: dd1ebeb2e71b2313eeab6b14bf89a7333ac1bd6b
 $ git anchor list                     # <id>  <target>  <body>
 dd1ebeb2  7a28df3c  revisit this bound
 
-$ git anchor project dd1ebeb2 main    # where does that span sit on main?
-relocated src/lib.rs:12,16
+$ git anchor show dd1ebeb2@main       # where does that span sit on main?
+relocated
+path: src/lib.rs
+lines: 12,16
 ```
 
 A note is a real ref and commit — `refs/anchors/<target>/<id>` — so `git ls-tree`, `git cat-file`, and `git log` inspect it with no application required.
