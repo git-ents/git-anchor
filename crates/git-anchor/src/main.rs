@@ -8,21 +8,27 @@
 //! (`Binding::Position`, a [`gix_anchor::Anchor`]). `list` and `show` read
 //! notes back — `show <id>@<rev>` projects a position-bound note onto another
 //! commit, re-deriving where its anchor now sits, the way git addresses a
-//! revision. `remove` deletes a note.
+//! revision; `show <id>~N` reads an older version of the note itself. `edit`
+//! and `append` reattach a new or extended body; `log` prints a note's
+//! version history. `remove` deletes one or more notes. Bare `git anchor`
+//! lists, like `git remote`.
 
 use std::io::{IsTerminal, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use gix::ObjectId;
-use gix_anchor::{Binding, LineRange, Projection, Store, StoredNote, capture, project, snippet};
+use gix_anchor::{
+    Anchor, Binding, LineRange, Projection, Store, StoredNote, capture, capture_worktree, project,
+    project_worktree, snippet,
+};
 
 #[derive(Parser)]
 #[command(name = "git-anchor", about = "Attach content to Git objects", version)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -30,44 +36,61 @@ enum Command {
     /// Attach a note to a revision (defaults to `HEAD`), or, with `--path`,
     /// to a specific blob path and optional line range within it.
     Add(AddArgs),
+    /// Replace a note's body. With no `-m`/`-F` and nothing piped, opens
+    /// `$EDITOR` seeded with the current body.
+    Edit(EditArgs),
+    /// Append to a note's body, separated by a blank line — the new content
+    /// is gathered the same way `add`'s body is.
+    Append(EditArgs),
     /// List attached notes, or only those attached to `<object>`.
     #[command(visible_alias = "ls")]
-    List {
-        /// A revision to filter notes down to those attached to it.
-        object: Option<String>,
-    },
+    List(ListArgs),
     /// Show a note's target, binding, and body. Append `@<rev>` to a
     /// position-bound note's id to project it onto another commit instead,
-    /// re-deriving where its anchor now sits.
-    Show {
-        /// A note id (an unambiguous hex prefix is fine), optionally with an
-        /// `@<rev>` suffix to project onto that revision.
-        spec: String,
-        /// Emit a machine-readable object instead of the human-readable form.
-        #[arg(long)]
-        json: bool,
+    /// re-deriving where its anchor now sits; append `~N` or `^` to see an
+    /// older version of the note itself.
+    Show(ShowArgs),
+    /// Show a note's version history, newest first.
+    Log {
+        /// A note id (an unambiguous hex prefix is fine).
+        id: String,
     },
-    /// Remove a note.
+    /// Remove one or more notes.
     #[command(visible_alias = "rm")]
     Remove {
-        /// A note id, or an unambiguous hex prefix of one.
-        id: String,
+        /// One or more note ids (unambiguous hex prefixes are fine). Every
+        /// id is resolved before any note is removed, so an ambiguous or
+        /// missing id leaves all notes untouched.
+        ids: Vec<String>,
     },
 }
 
 /// Arguments for `add`.
 #[derive(clap::Args)]
 struct AddArgs {
-    /// The revision to attach to. Defaults to `HEAD`.
+    /// The revision to attach to. Defaults to `HEAD`. Conflicts with
+    /// `--worktree`, which anchors the working tree instead of a revision.
+    #[arg(conflicts_with = "worktree")]
     object: Option<String>,
     /// Anchor a specific blob path (as it exists at `<object>`) instead of
-    /// the revision itself.
+    /// the revision itself. Resolved relative to the current directory, the
+    /// same way git pathspecs are.
     #[arg(long = "path", value_name = "PATH")]
     path: Option<String>,
-    /// Anchor a line range within `--path`: `start,end` (1-based,
-    /// inclusive), or a single line number alone. Requires `--path`.
-    #[arg(short = 'L', long = "lines", value_name = "START,END", value_parser = parse_line_range)]
-    lines: Option<LineRange>,
+    /// Anchor a line range within the path: `start,end` (1-based,
+    /// inclusive), `start,+count`, or a single line number alone. A
+    /// trailing `:path` supplies the path directly (as `git log -L` accepts)
+    /// — an error if `--path` is also given and disagrees. Requires a path
+    /// from one source or the other (checked immediately, before any git
+    /// work, since clap can't express "requires `--path`, unless this
+    /// value's own `:path` supplies one").
+    #[arg(
+        short = 'L',
+        long = "lines",
+        value_name = "START,END[:PATH]",
+        value_parser = parse_lines_arg
+    )]
+    lines: Option<LinesArg>,
     /// The note body, taken verbatim.
     #[arg(
         short = 'm',
@@ -79,6 +102,55 @@ struct AddArgs {
     /// Read the note body from a file.
     #[arg(short = 'F', long = "file", value_name = "FILE")]
     file: Option<PathBuf>,
+    /// Anchor the working tree's on-disk content at `--path` instead of a
+    /// committed revision. Requires `--path`; conflicts with `<object>`.
+    #[arg(long, requires = "path", conflicts_with = "object")]
+    worktree: bool,
+}
+
+/// Arguments shared by `edit` and `append`.
+#[derive(clap::Args)]
+struct EditArgs {
+    /// A note id, or an unambiguous hex prefix of one.
+    id: String,
+    /// The new (or, for `append`, additional) body, taken verbatim.
+    #[arg(
+        short = 'm',
+        long = "message",
+        value_name = "MSG",
+        conflicts_with = "file"
+    )]
+    message: Option<String>,
+    /// Read the body from a file.
+    #[arg(short = 'F', long = "file", value_name = "FILE")]
+    file: Option<PathBuf>,
+}
+
+/// Arguments for `list`.
+#[derive(clap::Args)]
+struct ListArgs {
+    /// A revision to filter notes down to those attached to it (including a
+    /// position note whose anchor was captured at that commit).
+    object: Option<String>,
+    /// Emit one JSON object per line instead of the human-readable columns.
+    #[arg(long)]
+    json: bool,
+}
+
+/// Arguments for `show`.
+#[derive(clap::Args)]
+struct ShowArgs {
+    /// A note id (an unambiguous hex prefix is fine), optionally with an
+    /// `@<rev>` suffix to project onto that revision, or a `~N`/`^` suffix
+    /// to read an older version of the note.
+    spec: String,
+    /// Emit a machine-readable object instead of the human-readable form.
+    #[arg(long)]
+    json: bool,
+    /// Project onto the working tree instead of showing the captured
+    /// location. Conflicts with an `@<rev>` or `~N`/`^` suffix on `spec`.
+    #[arg(long)]
+    worktree: bool,
 }
 
 fn main() -> Result<()> {
@@ -100,10 +172,15 @@ fn main() -> Result<()> {
     let store = Store::open(&repo);
 
     match cli.command {
-        Command::Add(args) => cmd_add(&repo, &store, args)?,
-        Command::List { object } => cmd_list(&repo, &store, object)?,
-        Command::Show { spec, json } => cmd_show(&repo, &store, &spec, json)?,
-        Command::Remove { id } => cmd_remove(&store, &id)?,
+        // Bare `git anchor` lists, like `git remote` — a read-only default.
+        None => cmd_list(&repo, &store, None, false)?,
+        Some(Command::Add(args)) => cmd_add(&repo, &store, args)?,
+        Some(Command::Edit(args)) => cmd_edit(&store, args)?,
+        Some(Command::Append(args)) => cmd_append(&store, args)?,
+        Some(Command::List(args)) => cmd_list(&repo, &store, args.object, args.json)?,
+        Some(Command::Show(args)) => cmd_show(&repo, &store, &args.spec, args.json, args.worktree)?,
+        Some(Command::Log { id }) => cmd_log(&repo, &store, &id)?,
+        Some(Command::Remove { ids }) => cmd_remove(&store, &ids)?,
     }
     Ok(())
 }
@@ -117,34 +194,108 @@ fn cmd_add(repo: &gix::Repository, store: &Store, args: AddArgs) -> Result<()> {
         lines,
         message,
         file,
+        worktree,
     } = args;
-    let object = object.unwrap_or_else(|| "HEAD".to_owned());
 
-    let binding = match &path {
-        Some(path) => {
-            let anchor = capture(repo, &object, path, lines)?;
-            Binding::Position(anchor)
+    // Reconcile `--path` with a path embedded in `-L START,END:path`: either
+    // may supply it, but not two disagreeing values.
+    let has_lines = lines.is_some();
+    let lines_path = lines.as_ref().and_then(|l| l.path.clone());
+    let raw_path = match (path, lines_path) {
+        (Some(path), Some(lines_path)) if path != lines_path => {
+            bail!("--path {path:?} and -L's embedded path {lines_path:?} disagree");
         }
-        None => {
-            if lines.is_some() {
-                bail!("-L/--lines requires --path");
+        (Some(path), _) => Some(path),
+        (None, Some(lines_path)) => Some(lines_path),
+        (None, None) => None,
+    };
+    // clap can't express "requires `--path`, unless `-L`'s own value
+    // supplies one" declaratively, so this is checked here — immediately,
+    // before any git work — rather than via `requires = "path"`.
+    if has_lines && raw_path.is_none() {
+        bail!("-L/--lines requires --path (or a `:PATH` embedded in -L's value)");
+    }
+    let path = raw_path
+        .map(|path| cwd_relative_path(repo, &path))
+        .transpose()?;
+    let range = lines.map(|l| l.range);
+
+    let binding = if worktree {
+        // clap's `requires = "path"` on `--worktree` guarantees this.
+        let path = path.expect("--worktree requires --path");
+        let anchor = capture_worktree(repo, &path, range)?;
+        Binding::Position(anchor)
+    } else {
+        match path {
+            Some(path) => {
+                let object = object.unwrap_or_else(|| "HEAD".to_owned());
+                let anchor = capture(repo, &object, &path, range)?;
+                Binding::Position(anchor)
             }
-            let commit = repo
-                .rev_parse_single(object.as_str())
-                .with_context(|| format!("cannot resolve revision {object:?}"))?
-                .detach();
-            Binding::Commit { commit }
+            None => {
+                let object = object.unwrap_or_else(|| "HEAD".to_owned());
+                let commit = repo
+                    .rev_parse_single(object.as_str())
+                    .with_context(|| {
+                        let mut msg = format!("cannot resolve revision {object:?}");
+                        if Path::new(&object).exists() {
+                            msg.push_str(&format!(
+                                "; to anchor a file, use: git anchor add --path {object}"
+                            ));
+                        }
+                        msg
+                    })?
+                    .detach();
+                Binding::Commit { commit }
+            }
         }
     };
 
-    let body = body_source(message.as_deref(), file.as_ref())?;
+    let body = body_source(message.as_deref(), file.as_ref(), "")?;
     let id = store.attach(&binding, &body, None)?;
     println!("{id}");
     Ok(())
 }
 
-/// `list`: every note, or only those attached to `<object>`.
-fn cmd_list(repo: &gix::Repository, store: &Store, object: Option<String>) -> Result<()> {
+/// `edit`: reattach a note's binding with a replacement body, seeding the
+/// editor (when reached) with the note's current body.
+fn cmd_edit(store: &Store, args: EditArgs) -> Result<()> {
+    let EditArgs { id, message, file } = args;
+    let note = resolve_note(store, &id)?;
+    let seed = String::from_utf8_lossy(&note.body).into_owned();
+    let body = body_source(message.as_deref(), file.as_ref(), &seed)?;
+    let new_id = store.attach(&note.binding, &body, None)?;
+    println!("{new_id}");
+    Ok(())
+}
+
+/// `append`: reattach a note's binding with new content joined onto the
+/// existing body by a blank line, `git notes append` style.
+fn cmd_append(store: &Store, args: EditArgs) -> Result<()> {
+    let EditArgs { id, message, file } = args;
+    let note = resolve_note(store, &id)?;
+    let addition = body_source(message.as_deref(), file.as_ref(), "")?;
+
+    let mut body = note.body.clone();
+    if !body.is_empty() {
+        body.extend_from_slice(b"\n\n");
+    }
+    body.extend_from_slice(&addition);
+
+    let new_id = store.attach(&note.binding, &body, None)?;
+    println!("{new_id}");
+    Ok(())
+}
+
+/// `list`: every note, or only those attached to `<object>` — including a
+/// position note whose anchor's own commit is `<object>`, even though its
+/// `target` (the anchored blob) is not.
+fn cmd_list(
+    repo: &gix::Repository,
+    store: &Store,
+    object: Option<String>,
+    json: bool,
+) -> Result<()> {
     let target = match object {
         Some(object) => Some(
             repo.rev_parse_single(object.as_str())
@@ -153,27 +304,85 @@ fn cmd_list(repo: &gix::Repository, store: &Store, object: Option<String>) -> Re
         ),
         None => None,
     };
-    for note in store.list(target)? {
-        println!(
-            "{}  {}  {}",
-            short(note.id),
-            short(note.target),
-            first_line(&note.body)
-        );
+
+    let notes = store.list(None)?;
+    let notes: Vec<StoredNote> = match target {
+        None => notes,
+        Some(target) => notes
+            .into_iter()
+            .filter(|note| note.target == target || position_commit(&note.binding) == Some(target))
+            .collect(),
+    };
+
+    for note in notes {
+        let kind = binding_kind(&note.binding);
+        if json {
+            print_note_json(&note, kind);
+        } else {
+            println!(
+                "{}  {}  {}",
+                short(note.id),
+                short(note.target),
+                first_line(&note.body)
+            );
+        }
     }
     Ok(())
 }
 
 /// `show`: a note's target, binding, body, and — for a position — its
-/// anchored snippet. With an `@<rev>` suffix on the id, project the note's
-/// anchor onto `<rev>` instead of showing its captured location.
-fn cmd_show(repo: &gix::Repository, store: &Store, spec: &str, json: bool) -> Result<()> {
-    let (id, rev) = split_id_rev(spec);
+/// anchored snippet. An `@<rev>` suffix projects the note's anchor onto
+/// `<rev>`; a `~N`/`^` suffix reads an older version of the note itself;
+/// `--worktree` projects onto the working tree.
+fn cmd_show(
+    repo: &gix::Repository,
+    store: &Store,
+    spec: &str,
+    json: bool,
+    worktree: bool,
+) -> Result<()> {
+    let (id, selector) = split_show_spec(spec)?;
     let note = resolve_note(store, id)?;
-    match rev {
-        Some(rev) => show_projection(repo, &note, rev, json),
-        None => show_note(&note, json),
+    match selector {
+        ShowSelector::Projection(rev) => {
+            if worktree {
+                bail!("--worktree conflicts with an @<rev> suffix on the note id");
+            }
+            show_projection(repo, &note, rev, json)
+        }
+        ShowSelector::Ancestor(n) => {
+            if worktree {
+                bail!("--worktree conflicts with a ~N/^ suffix on the note id");
+            }
+            let history = store.history(note.id)?;
+            let commit = *history.get(n).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "note {} has {} version(s); ~{n} is out of range",
+                    short(note.id),
+                    history.len()
+                )
+            })?;
+            let versioned = store.get_at(commit)?;
+            show_note(&versioned, json)
+        }
+        ShowSelector::Tip if worktree => show_worktree(repo, &note, json),
+        ShowSelector::Tip => show_note(&note, json),
     }
+}
+
+/// `log`: a note's version history, newest first — `<oid> <iso-date>
+/// <summary>` per version.
+fn cmd_log(repo: &gix::Repository, store: &Store, id: &str) -> Result<()> {
+    let note = resolve_note(store, id)?;
+    for commit_id in store.history(note.id)? {
+        let commit = repo.find_commit(commit_id)?;
+        let when = commit.time()?.format(gix::date::time::format::ISO8601)?;
+        let summary = gix::objs::commit::MessageRef::from_bytes(commit.message_raw_sloppy())
+            .summary()
+            .to_string();
+        println!("{commit_id} {when} {summary}");
+    }
+    Ok(())
 }
 
 /// A note at its captured location, human- or machine-readable.
@@ -192,7 +401,12 @@ fn show_note(note: &StoredNote, json: bool) -> Result<()> {
     println!("id: {}", note.id);
     println!("target: {}", note.target);
     println!("binding: {kind}");
-    if !note.message.is_empty() {
+    // The auto-generated `anchor <target>` summary (`Store::attach`'s
+    // default when no message is given) is storage plumbing, not something
+    // the user wrote — suppress it here; `--json` still reports it, and a
+    // real summary now surfaces via `log`.
+    let default_message = format!("anchor {}", note.target);
+    if !note.message.is_empty() && note.message != default_message {
         println!("message: {}", note.message);
     }
     println!("body:");
@@ -213,14 +427,38 @@ fn show_projection(repo: &gix::Repository, note: &StoredNote, rev: &str, json: b
             binding_kind(&note.binding)
         );
     };
-
     let projection = project(repo, anchor, rev)?;
+    print_projection(note, &projection, anchor, json)
+}
+
+/// Re-derive where a position-bound note's anchor now sits in the working
+/// tree.
+fn show_worktree(repo: &gix::Repository, note: &StoredNote, json: bool) -> Result<()> {
+    let Binding::Position(anchor) = &note.binding else {
+        bail!(
+            "note {} is a {} binding; --worktree projection applies only to line/blob anchors (add --path)",
+            short(note.id),
+            binding_kind(&note.binding)
+        );
+    };
+    let projection = project_worktree(repo, anchor, None)?;
+    print_projection(note, &projection, anchor, json)
+}
+
+/// Print a projection outcome, human- or machine-readable — shared by
+/// `show <id>@<rev>` and `show <id> --worktree`.
+fn print_projection(
+    note: &StoredNote,
+    projection: &Projection,
+    anchor: &Anchor,
+    json: bool,
+) -> Result<()> {
     if json {
-        print_projection_json(&projection);
+        print_projection_json(note, projection);
         return Ok(());
     }
     println!("{}", projection.label());
-    match &projection {
+    match projection {
         Projection::Relocated { path, lines } => {
             println!("path: {path}");
             if let Some(lines) = lines {
@@ -233,19 +471,25 @@ fn show_projection(repo: &gix::Repository, note: &StoredNote, rev: &str, json: b
     Ok(())
 }
 
-/// `remove`: delete a note.
-fn cmd_remove(store: &Store, id: &str) -> Result<()> {
-    let note = resolve_note(store, id)?;
-    if !store.remove(note.id)? {
-        bail!("no note {}", note.id);
+/// `remove`: delete every listed note, having resolved all of them first so
+/// an ambiguous or missing id leaves every note untouched.
+fn cmd_remove(store: &Store, ids: &[String]) -> Result<()> {
+    let notes: Vec<StoredNote> = ids
+        .iter()
+        .map(|id| resolve_note(store, id))
+        .collect::<Result<_>>()?;
+    for note in &notes {
+        if !store.remove(note.id)? {
+            bail!("no note {}", note.id);
+        }
     }
     Ok(())
 }
 
 /// The note body, in this precedence (mirroring `git notes add`): `-m
 /// <msg>`, else `-F <file>`, else piped stdin, else — at a terminal with
-/// neither — `$VISUAL`/`$EDITOR`.
-fn body_source(message: Option<&str>, file: Option<&PathBuf>) -> Result<Vec<u8>> {
+/// neither — `$VISUAL`/`$EDITOR`, seeded with `seed`.
+fn body_source(message: Option<&str>, file: Option<&PathBuf>, seed: &str) -> Result<Vec<u8>> {
     if let Some(message) = message {
         return Ok(message.as_bytes().to_vec());
     }
@@ -259,7 +503,7 @@ fn body_source(message: Option<&str>, file: Option<&PathBuf>) -> Result<Vec<u8>>
             .context("reading stdin")?;
         return Ok(buf);
     }
-    Ok(edit_in_editor("")?.into_bytes())
+    Ok(edit_in_editor(seed)?.into_bytes())
 }
 
 /// Open `$VISUAL`/`$EDITOR` on `seed` and return what the user saved.
@@ -301,30 +545,134 @@ fn resolve_note(store: &Store, prefix: &str) -> Result<StoredNote> {
     }
 }
 
-/// Split a `show` argument into a note-id prefix and an optional `@<rev>`
-/// projection target. Note ids are lowercase hex, so the first `@` cleanly
-/// separates the id from the revision; a bare trailing `@` carries no rev.
-fn split_id_rev(spec: &str) -> (&str, Option<&str>) {
-    match spec.split_once('@') {
-        Some((id, rev)) if !rev.is_empty() => (id, Some(rev)),
-        Some((id, _)) => (id, None),
-        None => (spec, None),
+/// What a `show` argument's suffix selects, once the note id prefix is split
+/// off.
+enum ShowSelector<'a> {
+    /// No suffix: the note's current tip.
+    Tip,
+    /// `<id>@<rev>`: project the position-bound anchor onto `<rev>`.
+    Projection(&'a str),
+    /// `<id>~N` (or bare `<id>~`, `<id>^`, meaning `~1`): the note's body as
+    /// of `N` versions back from the tip (`~0` is the tip itself).
+    Ancestor(usize),
+}
+
+/// Split a `show` argument into a note-id prefix and its suffix, mirroring
+/// git's own revision grammar: `@<rev>` projects onto another revision,
+/// `~N`/`^` walks the note's own version history instead. Note ids are
+/// lowercase hex, so the first of `@`, `~`, `^` cleanly separates the id
+/// from its suffix. `@{…}` (git's reflog/date syntax) is rejected outright
+/// rather than mangled into a revision lookup that would just fail
+/// confusingly downstream.
+fn split_show_spec(spec: &str) -> Result<(&str, ShowSelector<'_>)> {
+    let Some(i) = spec.find(['@', '~', '^']) else {
+        return Ok((spec, ShowSelector::Tip));
+    };
+    let (id, marker) = spec.split_at(i);
+    match marker.as_bytes()[0] {
+        b'@' => {
+            let rev = &marker[1..];
+            if rev.starts_with('{') {
+                bail!(
+                    "{marker:?} looks like git's `@{{...}}` reflog syntax, which a note id \
+                     does not support; use `<id>@<rev>` to project onto a revision, or \
+                     `<id>~N` to read an older version of the note itself"
+                );
+            }
+            if rev.is_empty() {
+                Ok((id, ShowSelector::Tip))
+            } else {
+                Ok((id, ShowSelector::Projection(rev)))
+            }
+        }
+        b'~' => {
+            let rest = &marker[1..];
+            let n: usize = if rest.is_empty() {
+                1
+            } else {
+                rest.parse()
+                    .map_err(|_error| anyhow::anyhow!("invalid version offset {marker:?}"))?
+            };
+            Ok((id, ShowSelector::Ancestor(n)))
+        }
+        b'^' => {
+            if marker.len() > 1 {
+                bail!("only a bare `^` is supported (no `^N`); use `~N` instead");
+            }
+            Ok((id, ShowSelector::Ancestor(1)))
+        }
+        _ => unreachable!("split only on '@', '~', or '^'"),
     }
 }
 
-/// `-L`'s value: `start,end`, or a single line number standing in for
-/// `start,start`.
-fn parse_line_range(raw: &str) -> std::result::Result<LineRange, String> {
-    let mut parts = raw.splitn(2, ',');
-    let start = parts.next().unwrap_or_default().trim();
-    let end = parts.next().map(str::trim).unwrap_or(start);
-    let start: u64 = start
+/// `-L`'s value, once parsed: the range, and an optional path carried in a
+/// trailing `:PATH` (`git log -L`'s own grammar).
+#[derive(Debug, Clone)]
+struct LinesArg {
+    range: LineRange,
+    path: Option<String>,
+}
+
+/// `-L`'s value: `start,end`, `start,+count`, or a single line number alone
+/// standing in for `start,start` — optionally followed by `:path` to supply
+/// the anchored path in the same token.
+fn parse_lines_arg(raw: &str) -> std::result::Result<LinesArg, String> {
+    let (range_part, path) = match raw.split_once(':') {
+        Some((range_part, path)) => (range_part, Some(path.to_owned())),
+        None => (raw, None),
+    };
+
+    let mut parts = range_part.splitn(2, ',');
+    let start_str = parts.next().unwrap_or_default().trim();
+    let end_str = parts.next().map(str::trim);
+    let start: u64 = start_str
         .parse()
-        .map_err(|_error| format!("invalid line number {start:?}"))?;
-    let end: u64 = end
-        .parse()
-        .map_err(|_error| format!("invalid line number {end:?}"))?;
-    Ok(LineRange { start, end })
+        .map_err(|_error| format!("invalid line number {start_str:?}"))?;
+    let end = match end_str {
+        None => start,
+        Some(end_str) => match end_str.strip_prefix('+') {
+            Some(count_str) => {
+                let count: u64 = count_str
+                    .parse()
+                    .map_err(|_error| format!("invalid line count {count_str:?}"))?;
+                start.saturating_add(count).saturating_sub(1).max(start)
+            }
+            None => end_str
+                .parse()
+                .map_err(|_error| format!("invalid line number {end_str:?}"))?,
+        },
+    };
+    Ok(LinesArg {
+        range: LineRange { start, end },
+        path,
+    })
+}
+
+/// Prefix a `--path` (or `-L`'s embedded path) value with the path from the
+/// repository root to the current directory, so it behaves like an ordinary
+/// git pathspec — resolved relative to cwd, not the repo root — the same
+/// convention `git add <path>` uses.
+fn cwd_relative_path(repo: &gix::Repository, path: &str) -> Result<String> {
+    let prefix = repo
+        .prefix()
+        .context("determining the repository's cwd prefix")?;
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(prefix) = prefix {
+        parts.extend(path_components(prefix));
+    }
+    parts.extend(path_components(Path::new(path)));
+    Ok(parts.join("/"))
+}
+
+/// The normal (non-`.`) path components of `path`, as plain strings —
+/// `cwd_relative_path`'s helper, applied to both the repo prefix and the
+/// user-supplied path so the joined result is a clean, forward-slash
+/// pathspec regardless of the host platform's separator.
+fn path_components(path: &Path) -> impl Iterator<Item = String> + '_ {
+    path.components().filter_map(|component| match component {
+        std::path::Component::CurDir => None,
+        other => Some(other.as_os_str().to_string_lossy().into_owned()),
+    })
 }
 
 /// A short, display-only prefix of an object id (not necessarily unique;
@@ -350,6 +698,17 @@ fn binding_kind(binding: &Binding) -> &'static str {
         Binding::Delta { .. } => "delta",
         Binding::Position(_) => "position",
         Binding::Hybrid { .. } => "hybrid",
+    }
+}
+
+/// A position-bound binding's anchor's own commit, or `None` for any other
+/// binding kind — `list <commit>`'s extra filter (item 4): a position note's
+/// `target` is the anchored blob, not the commit it was captured at, so
+/// filtering on `target` alone would silently omit it.
+fn position_commit(binding: &Binding) -> Option<ObjectId> {
+    match binding {
+        Binding::Position(anchor) => Some(anchor.commit()),
+        _ => None,
     }
 }
 
@@ -381,10 +740,28 @@ fn print_json(note: &StoredNote, kind: &str, snippet: Option<&str>) {
     println!("{{{}}}", fields.join(","));
 }
 
-/// Emit a projection outcome as a small JSON object: always its `outcome`,
-/// plus the `path` (and `lines`, when known) for a relocated or outdated span.
-fn print_projection_json(projection: &Projection) {
-    let mut fields = vec![format!("\"outcome\":\"{}\"", projection.label())];
+/// Emit a `list` entry as a small JSON object: `id`, `target`, `binding`,
+/// and `summary` (the latest version's commit summary).
+fn print_note_json(note: &StoredNote, kind: &str) {
+    let fields = [
+        format!("\"id\":\"{}\"", note.id),
+        format!("\"target\":\"{}\"", note.target),
+        format!("\"binding\":\"{kind}\""),
+        format!("\"summary\":{}", json_string(&note.message)),
+    ];
+    println!("{{{}}}", fields.join(","));
+}
+
+/// Emit a projection outcome as a small JSON object: the note's own `id` and
+/// `target` (so the object is self-describing on its own, item 11), its
+/// `outcome`, plus the `path` (and `lines`, when known) for a relocated or
+/// outdated span.
+fn print_projection_json(note: &StoredNote, projection: &Projection) {
+    let mut fields = vec![
+        format!("\"id\":\"{}\"", note.id),
+        format!("\"target\":\"{}\"", note.target),
+        format!("\"outcome\":\"{}\"", projection.label()),
+    ];
     match projection {
         Projection::Relocated { path, lines } => {
             fields.push(format!("\"path\":{}", json_string(path)));

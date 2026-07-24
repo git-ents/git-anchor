@@ -13,7 +13,7 @@ Two crates:
 
 ```console
 $ git anchor add --path src/lib.rs -L 10,14 -m "revisit this bound"
-id: dd1ebeb2e71b2313eeab6b14bf89a7333ac1bd6b
+dd1ebeb2e71b2313eeab6b14bf89a7333ac1bd6b
 
 $ git anchor list                     # <id>  <target>  <body>
 dd1ebeb2  7a28df3c  revisit this bound

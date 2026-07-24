@@ -148,6 +148,21 @@ impl<'r> Store<'r> {
         }
     }
 
+    /// Read the note document committed directly at `commit`, rather than
+    /// at a ref's current tip — the version-history counterpart to
+    /// [`Store::get`], for reading an older entry off [`Store::history`]'s
+    /// list (`git anchor show <id>~N`'s library hook).
+    ///
+    /// # Errors
+    ///
+    /// Propagates a commit- or tree-read failure, and a malformed or
+    /// unrecognized stored [`Binding`] shape. Does not check that `commit`
+    /// is actually reachable from any note ref — callers that need that
+    /// guarantee should check it against [`Store::history`] themselves.
+    pub fn get_at(&self, commit: ObjectId) -> Result<StoredNote> {
+        self.note_at_commit(commit)
+    }
+
     /// Delete a note's ref. Returns whether it existed.
     ///
     /// # Errors
@@ -201,7 +216,14 @@ impl<'r> Store<'r> {
         let Some(tip) = self.tip(refname)? else {
             return Ok(None);
         };
-        let commit = self.repo.find_commit(tip).map_err(Error::git)?;
+        self.note_at_commit(tip).map(Some)
+    }
+
+    /// Read the note document committed at `commit` directly — shared by
+    /// [`Store::read_note`] (a ref's tip) and [`Store::get_at`] (any commit
+    /// off a note's history).
+    fn note_at_commit(&self, commit: ObjectId) -> Result<StoredNote> {
+        let commit = self.repo.find_commit(commit).map_err(Error::git)?;
         let tree = commit.tree_id().map_err(Error::git)?.detach();
         let note: Note = facet_git_tree::deserialize(&tree, &self.repo.objects)?;
         let id = note.binding.oid();
@@ -210,13 +232,13 @@ impl<'r> Store<'r> {
         let message = gix_object::commit::MessageRef::from_bytes(commit.message_raw_sloppy())
             .summary()
             .to_string();
-        Ok(Some(StoredNote {
+        Ok(StoredNote {
             id,
             target,
             binding,
             body: note.body,
             message,
-        }))
+        })
     }
 
     /// The full refname of the note with identity `id`, scanning every ref
