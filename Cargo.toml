@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/gix-anchor", "crates/test-support"]
+resolver = "3"
