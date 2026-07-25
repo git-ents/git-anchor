@@ -8,14 +8,14 @@
 //! library call a CLI porcelain would make (`lens.parity`), so a comment is
 //! one entity across the editor and any other frontend.
 
-use std::path::PathBuf;
-
 use gix::ObjectId;
 use gix_anchor::{Binding, capture_worktree, project_worktree};
 use gix_comment::Comments;
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CodeLens, Command, Diagnostic, Hover,
-    HoverContents, Position, Range, Url,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeLens, CreateFile, CreateFileOptions,
+    Diagnostic, DocumentChangeOperation, DocumentChanges, Hover, HoverContents, OneOf,
+    OptionalVersionedTextDocumentIdentifier, Position, Range, ResourceOp, TextDocumentEdit,
+    TextEdit, Url, WorkspaceEdit,
 };
 use serde_json::{Value, json};
 
@@ -26,17 +26,17 @@ use crate::render;
 
 /// What an `executeCommand` or a `didSave` produced, in protocol-neutral
 /// terms the server layer turns into LSP messages: an optional command
-/// result value, an optional file to open with `window/showDocument`, and
-/// whether the open documents' diagnostics should be republished (a comment
-/// mutation invalidates every derived view, `lens.lenses`).
+/// result value, an optional workspace edit to apply, and whether the open
+/// documents' diagnostics should be republished (a comment mutation
+/// invalidates every derived view, `lens.lenses`).
 #[derive(Debug, Default)]
 pub struct Outcome {
     /// The `workspace/executeCommand` result value (the thread markup, for
     /// View); `None` for a command whose effect is a side effect only.
     pub response: Option<Value>,
-    /// A file the client should open (`window/showDocument`) — a compose or
-    /// reply template (`lens.compose`).
-    pub show_document: Option<PathBuf>,
+    /// A workspace edit the client should apply (`workspace/applyEdit`) —
+    /// creating and filling in a compose or reply template (`lens.compose`).
+    pub edit: Option<WorkspaceEdit>,
     /// Whether every open document's diagnostics should be recomputed and
     /// republished, because a comment just changed.
     pub refresh: bool,
@@ -205,9 +205,13 @@ impl Lens {
     }
 
     /// The code actions for a selection in `uri` (`lens.compose`): a
-    /// "Comment on these lines" action, whose command opens the compose
-    /// template anchored to exactly the selected lines against the working
-    /// tree. Empty when the URI is not a file in the working tree.
+    /// "Comment on these lines" action whose edit creates the compose
+    /// template, anchored to exactly the selected lines against the working
+    /// tree, and opens it (`workspace/applyEdit` — unlike
+    /// `window/showDocument`, which Zed does not open local files for, a
+    /// `CreateFile` edit is the mechanism clients already use to open a
+    /// freshly created file, e.g. rust-analyzer's "Extract module to
+    /// file"). Empty when the URI is not a file in the working tree.
     ///
     /// # Errors
     ///
@@ -220,18 +224,18 @@ impl Lens {
         let Some(rel) = document::relative_path(workdir, uri) else {
             return Ok(Vec::new());
         };
-        let lines = selection_lines(range);
-        let command = Command {
-            title: "Comment on these lines".to_owned(),
-            command: render::CMD_COMPOSE.to_owned(),
-            arguments: Some(vec![json!({ "path": rel, "lines": lines })]),
+        let target = Target {
+            path: Some(rel),
+            lines: Some(selection_lines(range)),
+            parent: None,
         };
+        let edit = self.template_edit(&target)?;
         Ok(vec![CodeActionOrCommand::CodeAction(CodeAction {
             title: "Comment on these lines".to_owned(),
             kind: Some(CodeActionKind::EMPTY),
             diagnostics: None,
-            edit: None,
-            command: Some(command),
+            edit: Some(edit),
+            command: None,
             is_preferred: None,
             disabled: None,
             data: None,
@@ -240,8 +244,9 @@ impl Lens {
 
     /// Run a `workspace/executeCommand` the lens registered (`lens.lenses`,
     /// `lens.compose`): View returns the thread, Resolve/Reopen record the
-    /// state mutation through the shared library call, and Reply/Compose
-    /// open a template.
+    /// state mutation through the shared library call, and Reply opens a
+    /// template (Compose does the same directly through its code action's
+    /// edit, `lens.compose`).
     ///
     /// # Errors
     ///
@@ -282,17 +287,9 @@ impl Lens {
                     parent: Some(id.to_string()),
                     ..Target::default()
                 };
-                let template = self.write_template(&target)?;
+                let edit = self.template_edit(&target)?;
                 Ok(Outcome {
-                    show_document: Some(template),
-                    ..Outcome::default()
-                })
-            }
-            render::CMD_COMPOSE => {
-                let target = compose_target(arguments)?;
-                let template = self.write_template(&target)?;
-                Ok(Outcome {
-                    show_document: Some(template),
+                    edit: Some(edit),
                     ..Outcome::default()
                 })
             }
@@ -352,16 +349,43 @@ impl Lens {
         saved_dir.as_deref() == Some(git_dir.as_path())
     }
 
-    /// Write the template for `target` under `.git/` and return its path
-    /// (`lens.compose`).
-    fn write_template(&self, target: &Target) -> Result<PathBuf> {
-        let template = self.repo.git_dir().join(compose::template_filename(target));
-        let text = compose::template_text(target);
-        std::fs::write(&template, text).map_err(|source| Error::Template {
-            path: template.clone(),
-            source,
-        })?;
-        Ok(template)
+    /// The workspace edit that creates and fills in the compose/reply
+    /// template for `target` under `.git/` (`lens.compose`): a `CreateFile`
+    /// operation followed by a `TextDocumentEdit` inserting
+    /// [`compose::template_text`] into it. Applying this edit
+    /// (`workspace/applyEdit`) is what gets a client to open the template,
+    /// since `window/showDocument` is not reliably supported for local
+    /// files.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TemplateUri`] if the template path cannot be turned into a
+    /// file URI.
+    fn template_edit(&self, target: &Target) -> Result<WorkspaceEdit> {
+        let path = self.repo.git_dir().join(compose::template_filename(target));
+        let uri = document::file_uri(&path).ok_or_else(|| Error::TemplateUri(path.clone()))?;
+        let create = DocumentChangeOperation::Op(ResourceOp::Create(CreateFile {
+            uri: uri.clone(),
+            options: Some(CreateFileOptions {
+                overwrite: Some(true),
+                ignore_if_exists: None,
+            }),
+            annotation_id: None,
+        }));
+        let insert = DocumentChangeOperation::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+            edits: vec![OneOf::Left(TextEdit {
+                range: Range {
+                    start: Position::default(),
+                    end: Position::default(),
+                },
+                new_text: compose::template_text(target),
+            })],
+        });
+        Ok(WorkspaceEdit {
+            document_changes: Some(DocumentChanges::Operations(vec![create, insert])),
+            ..WorkspaceEdit::default()
+        })
     }
 
     /// Read the saved template at `uri` and create the comment it describes
@@ -453,23 +477,4 @@ fn arg_id(arguments: &[Value]) -> Result<ObjectId> {
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadArguments("expected a comment id argument".to_owned()))?;
     parse_id(text)
-}
-
-/// Extract a [`Target`] from the `comment.compose` command's `{path,
-/// lines}` object argument.
-fn compose_target(arguments: &[Value]) -> Result<Target> {
-    let object = arguments
-        .first()
-        .ok_or_else(|| Error::BadArguments("compose needs a target".to_owned()))?;
-    Ok(Target {
-        path: object
-            .get("path")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        lines: object
-            .get("lines")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        parent: None,
-    })
 }

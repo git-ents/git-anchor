@@ -48,4 +48,10 @@ pub enum Error {
     /// frame) or the initialize handshake did not complete (`lens.serve`).
     #[error(transparent)]
     Io(#[from] std::io::Error),
+
+    /// A compose/reply template's path could not be turned into a file URI
+    /// (`lens.compose`) — in practice only a non-absolute `.git` directory,
+    /// which never happens outside of a misconfigured repository.
+    #[error("cannot build a file URI for template {0}")]
+    TemplateUri(std::path::PathBuf),
 }

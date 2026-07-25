@@ -12,15 +12,20 @@
 //! `lens.compose` requires composing to work through a file "the way git
 //! itself takes a commit message", using no client-specific extension. The
 //! flow the lens drives, using only standard LSP a plain client provides
-//! (`workspace/executeCommand`, `window/showDocument`, and
+//! (`workspace/applyEdit`, `workspace/executeCommand`, and
 //! `textDocument/didSave`):
 //!
 //! 1. A `textDocument/codeAction` on the selection returns a "Comment on
-//!    these lines" command; a lens's Reply command targets a parent
-//!    instead.
-//! 2. The client runs it via `workspace/executeCommand`; the lens writes
-//!    [`template_text`] to a file under `.git/` named by [`template_filename`]
-//!    and asks the client to open it with `window/showDocument`.
+//!    these lines" action carrying a `WorkspaceEdit`; a lens's Reply
+//!    command targets a parent instead and applies the same edit through
+//!    `workspace/executeCommand` plus a server-sent `workspace/applyEdit`,
+//!    since a code lens command has no `edit` field of its own.
+//! 2. The edit's `CreateFile` operation creates a file under `.git/` named
+//!    by [`template_filename`], and its `TextDocumentEdit` fills it in with
+//!    [`template_text`]. Applying the edit is what gets the client to open
+//!    the file — the same mechanism a "move to new file" refactor uses —
+//!    rather than `window/showDocument`, which is not reliably supported
+//!    for local files.
 //! 3. The user edits the body and saves. The lens's `textDocument/didSave`
 //!    handler reads the file, [`parse`]s it, and — if the body is
 //!    non-empty — creates the comment through `gix_comment::Comments::add`

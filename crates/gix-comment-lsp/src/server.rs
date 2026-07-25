@@ -23,14 +23,15 @@ use lsp_types::notification::{
     Notification as _, PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, CodeLensRequest, ExecuteCommand, HoverRequest, Request as _, ShowDocument,
+    ApplyWorkspaceEdit, CodeActionRequest, CodeLensRequest, ExecuteCommand, HoverRequest,
+    Request as _,
 };
 use lsp_types::{
-    CodeActionProviderCapability, CodeLensOptions, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    ExecuteCommandOptions, HoverProviderCapability, PublishDiagnosticsParams, ServerCapabilities,
-    ShowDocumentParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncOptions,
-    TextDocumentSyncSaveOptions, Url,
+    ApplyWorkspaceEditParams, CodeActionProviderCapability, CodeLensOptions,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, ExecuteCommandOptions, HoverProviderCapability,
+    PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, Url, WorkspaceEdit,
 };
 
 use crate::lens::{Lens, Outcome};
@@ -39,7 +40,7 @@ use crate::render;
 /// The capabilities the lens advertises (`lens.serve`): full-text document
 /// sync with save notifications (the compose flow needs the save,
 /// `lens.compose`), code lenses (`lens.lenses`), hover (`lens.hover`), code
-/// actions (`lens.compose`), and the five executable commands
+/// actions (`lens.compose`), and the four executable commands
 /// (`lens.lenses`, `lens.compose`). No workspace, symbol, or completion
 /// surface — the lens is a conversation view, not a language analyzer.
 #[must_use]
@@ -64,7 +65,6 @@ pub fn capabilities() -> ServerCapabilities {
                 render::CMD_REPLY.to_owned(),
                 render::CMD_RESOLVE.to_owned(),
                 render::CMD_REOPEN.to_owned(),
-                render::CMD_COMPOSE.to_owned(),
             ],
             work_done_progress_options: lsp_types::WorkDoneProgressOptions::default(),
         }),
@@ -125,7 +125,7 @@ impl ServerLoop {
                     self.on_request(request);
                 }
                 Message::Notification(notification) => self.on_notification(notification),
-                // Responses to our own `window/showDocument` requests carry
+                // Responses to our own `workspace/applyEdit` requests carry
                 // nothing the lens needs to act on.
                 Message::Response(_) => {}
             }
@@ -157,7 +157,7 @@ impl ServerLoop {
             Err(request) => request,
         };
         // `executeCommand` is the one request with side effects, handled on
-        // its own so its `Outcome` can drive `showDocument` and refreshes.
+        // its own so its `Outcome` can drive `applyEdit` and refreshes.
         let request = match self.on_execute_command(request) {
             Ok(()) => return,
             Err(request) => request,
@@ -266,13 +266,11 @@ impl ServerLoop {
         }
     }
 
-    /// Apply an [`Outcome`]'s side effects: open a compose/reply template
-    /// and/or republish diagnostics for every open document.
+    /// Apply an [`Outcome`]'s side effects: create/open a compose or reply
+    /// template and/or republish diagnostics for every open document.
     fn apply(&mut self, outcome: Outcome) {
-        if let Some(path) = outcome.show_document
-            && let Some(uri) = crate::document::file_uri(&path)
-        {
-            self.show_document(uri);
+        if let Some(edit) = outcome.edit {
+            self.apply_edit(edit);
         }
         if outcome.refresh {
             for uri in self.lens.open_documents() {
@@ -304,20 +302,18 @@ impl ServerLoop {
             .send(Message::Notification(notification));
     }
 
-    /// Ask the client to open `uri` (`window/showDocument`) — a compose or
-    /// reply template (`lens.compose`).
-    fn show_document(&self, uri: Url) {
-        let params = ShowDocumentParams {
-            uri,
-            external: Some(false),
-            take_focus: Some(true),
-            selection: None,
-        };
+    /// Ask the client to apply `edit` (`workspace/applyEdit`) — creating
+    /// and opening a compose or reply template (`lens.compose`). Unlike
+    /// `window/showDocument`, which Zed does not open local files for, this
+    /// is the mechanism clients already support for opening a file a
+    /// refactor just created.
+    fn apply_edit(&self, edit: WorkspaceEdit) {
+        let params = ApplyWorkspaceEditParams { label: None, edit };
         let request = Request {
-            // A fixed id: the lens never correlates showDocument responses,
+            // A fixed id: the lens never correlates applyEdit responses,
             // and only one is ever in flight per user action.
-            id: RequestId::from("gix-comment-lsp-show-document".to_owned()),
-            method: ShowDocument::METHOD.to_owned(),
+            id: RequestId::from("gix-comment-lsp-apply-edit".to_owned()),
+            method: ApplyWorkspaceEdit::METHOD.to_owned(),
             params: serde_json::to_value(params).unwrap_or(serde_json::Value::Null),
         };
         let _ = self.connection.sender.send(Message::Request(request));

@@ -84,8 +84,8 @@ fn canonical(path: &Path) -> PathBuf {
     }
 }
 
-/// The absolute file URI for `path` — used to open a compose template with
-/// `window/showDocument`.
+/// The absolute file URI for `path` — used to name a compose template in
+/// the `WorkspaceEdit` that creates and opens it.
 #[must_use]
 pub fn file_uri(path: &Path) -> Option<Url> {
     Url::from_file_path(path).ok()

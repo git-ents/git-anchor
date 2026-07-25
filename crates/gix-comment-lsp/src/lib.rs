@@ -29,12 +29,14 @@
 //! # The compose-on-save mechanism
 //!
 //! Composing works entirely through standard LSP a plain client provides —
-//! `workspace/executeCommand`, `window/showDocument`, and
-//! `textDocument/didSave` — with no client-specific extension. The
-//! `comment.compose` command writes a git-commit-style template under
-//! `.git/` and asks the client to open it; when the user saves it, the
-//! `didSave` handler creates the comment (or aborts on an empty body). See
-//! [`compose`] for the exact grammar and rationale.
+//! `workspace/applyEdit` (via a code action's `edit`, or via
+//! `workspace/executeCommand` for the reply lens) and `textDocument/didSave`
+//! — with no client-specific extension. The edit creates a git-commit-style
+//! template under `.git/` and fills it in; the client opens it because it
+//! just created the file, which is more reliably supported than asking the
+//! client to open a file with `window/showDocument`. When the user saves
+//! it, the `didSave` handler creates the comment (or aborts on an empty
+//! body). See [`compose`] for the exact grammar and rationale.
 #![forbid(unsafe_code)]
 
 mod compose;
@@ -46,5 +48,5 @@ mod server;
 
 pub use error::{Error, Result};
 pub use lens::{Lens, Outcome};
-pub use render::{CMD_COMPOSE, CMD_REOPEN, CMD_REPLY, CMD_RESOLVE, CMD_VIEW};
+pub use render::{CMD_REOPEN, CMD_REPLY, CMD_RESOLVE, CMD_VIEW};
 pub use server::{capabilities, serve};

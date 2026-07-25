@@ -24,9 +24,6 @@ pub const CMD_REPLY: &str = "comment.reply";
 pub const CMD_RESOLVE: &str = "comment.resolve";
 /// The command that reopens a resolved comment (`lens.lenses`).
 pub const CMD_REOPEN: &str = "comment.reopen";
-/// The command that opens the compose template for a new comment
-/// (`lens.compose`).
-pub const CMD_COMPOSE: &str = "comment.compose";
 
 /// The diagnostic/lens source label the lens stamps every item with, so a
 /// client can suppress just the conversation (`lens.diagnostics`).
