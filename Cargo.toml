@@ -3,6 +3,7 @@ members = [
     "crates/gix-anchor",
     "crates/git-anchor",
     "crates/gix-comment",
+    "crates/git-comment",
     "crates/test-support",
 ]
 resolver = "3"

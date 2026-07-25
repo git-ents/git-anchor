@@ -3,11 +3,16 @@
 Attach arbitrary content to Git objects — a commit, tree, tag, or blob — and optionally to a line range within a blob.
 The attachment survives history: an anchor captured against one commit projects onto any later commit, so a comment, review note, or TODO pinned to a span of code follows that code as it moves.
 
-Two crates:
+Four crates — the anchor primitive and its CLI, plus a first consumer (comments) and its CLI:
 
 - [`gix-anchor`](crates/gix-anchor) — the library: capture, store, and project
   anchors over a `gix` repository.
 - [`git-anchor`](crates/git-anchor) — a git external subcommand (`git anchor …`).
+- [`gix-comment`](crates/gix-comment) — a thin library over `gix-anchor`: a
+  message pinned to any anchor, whose author and timestamp are the storage
+  commit's, plus an optional raw-tree attachment.
+- [`git-comment`](crates/git-comment) — a git external subcommand
+  (`git comment …`).
 
 ## Demo
 
