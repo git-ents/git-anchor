@@ -245,6 +245,7 @@ mod tests {
             parent: None,
             state,
             commit: ObjectId::null(gix::hash::Kind::Sha1),
+            created_at: 0,
         }
     }
 

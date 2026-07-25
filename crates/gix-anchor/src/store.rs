@@ -83,6 +83,26 @@ struct Note {
     attachment: Option<RawTree>,
     parent: Option<String>,
     state: Option<String>,
+    /// Nanoseconds since the Unix epoch, best-effort, set once when a note
+    /// is first created and forwarded unchanged by every later version
+    /// ([`Store::attach`]/[`Store::attach_with_attachment`] re-attaching,
+    /// [`Store::update`] versioning forward) — a tiebreaker for two notes
+    /// whose commit author time lands in the same second (git's own
+    /// resolution), which an id-based tiebreak cannot order correctly since
+    /// a note's id is a content hash, uncorrelated with when it was
+    /// written. Not a substitute for a note's real timestamp; a caller
+    /// wanting that reads it off the storage commit itself, same as today.
+    created_at: u64,
+}
+
+/// The current wall-clock time, in nanoseconds since the Unix epoch,
+/// best-effort (`0` if the clock reads before the epoch) — [`Note::created_at`]'s
+/// source for a freshly created note.
+fn now_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// A content-addressed store of notes over a `gix` repository, git-notes
@@ -132,6 +152,13 @@ pub struct StoredNote {
     /// [`Store::get_at`]. Its author and time are the note's author and
     /// timestamp, since a note *is* a git commit.
     pub commit: ObjectId,
+    /// [`Note::created_at`]: nanoseconds since the Unix epoch, best-effort,
+    /// fixed at the note's first version and forwarded unchanged by every
+    /// later one. A finer-grained tiebreaker than `commit`'s own author
+    /// time (git's one-second resolution) for a caller such as
+    /// `gix-comment` ordering notes that landed in the same second; not a
+    /// substitute for `commit`'s real timestamp.
+    pub created_at: u64,
 }
 
 impl<'r> Store<'r> {
@@ -210,16 +237,24 @@ impl<'r> Store<'r> {
         check_hex_component("target", &target.to_string())?;
         check_hex_component("id", &id.to_string())?;
 
+        let refname = self.anchor_ref(target, id);
+        // A re-attach forwards the original `created_at` rather than
+        // resetting it, so editing a note never changes its place in a
+        // caller's creation-order tiebreak.
+        let created_at = match self.tip(&refname)? {
+            Some(tip) => self.created_at_at(tip)?,
+            None => now_nanos(),
+        };
         let note = Note {
             body: body.to_vec(),
             binding: RawTree::new(id),
             attachment: attachment.map(RawTree::new),
             parent: None,
             state: None,
+            created_at,
         };
         let tree = facet_git_tree::serialize_into(&note, &self.repo.objects)?;
 
-        let refname = self.anchor_ref(target, id);
         let default_summary = format!("anchor {target}");
         let summary = message.unwrap_or(&default_summary);
         self.commit_forward(&refname, summary, tree)?;
@@ -274,6 +309,7 @@ impl<'r> Store<'r> {
             attachment: attachment.map(RawTree::new),
             parent,
             state,
+            created_at: now_nanos(),
         };
         let tree = facet_git_tree::serialize_into(&note, &self.repo.objects)?;
 
@@ -340,6 +376,7 @@ impl<'r> Store<'r> {
             attachment: attachment.map(RawTree::new),
             parent,
             state,
+            created_at: self.created_at_at(tip)?,
         };
         let tree = facet_git_tree::serialize_into(&note, &self.repo.objects)?;
         self.commit_forward(&refname, message, tree)?;
@@ -492,7 +529,18 @@ impl<'r> Store<'r> {
             parent: note.parent,
             state: note.state,
             commit,
+            created_at: note.created_at,
         })
+    }
+
+    /// [`Note::created_at`] read back off `commit` — [`Store::attach_with_attachment`]'s
+    /// and [`Store::update`]'s helper for forwarding a note's original
+    /// creation order unchanged across a re-attach or a version-forward.
+    fn created_at_at(&self, commit: ObjectId) -> Result<u64> {
+        let commit_obj = self.repo.find_commit(commit).map_err(Error::git)?;
+        let tree = commit_obj.tree_id().map_err(Error::git)?.detach();
+        let note: Note = facet_git_tree::deserialize(&tree, &self.repo.objects)?;
+        Ok(note.created_at)
     }
 
     /// The oid of the note document's own `binding` entry at `commit`,

@@ -108,6 +108,13 @@ pub struct Comment {
     /// for [`Comments::get`]/[`Comments::list`], or a past version for
     /// [`Comments::get_at`].
     pub commit: ObjectId,
+    /// [`gix_anchor::StoredNote::created_at`]: nanoseconds since the Unix
+    /// epoch, best-effort, fixed when the comment was first created and
+    /// unchanged by `edit`/`append`/`resolve`/`reopen`. [`Comments::thread`]'s
+    /// tiebreaker for two replies whose `author.time` lands in the same
+    /// second (git's own resolution); not a display timestamp — use
+    /// `author.time` for that.
+    pub created_at: u64,
 }
 
 /// A comment and its replies, oldest reply first — [`Comments::thread`]'s
@@ -292,11 +299,13 @@ impl<'r> Comments<'r> {
             .filter(|comment| comment.id != root.id && root_of(&by_id, comment.id) == root.id)
             .cloned()
             .collect();
+        // `created_at` alone already orders replies correctly — it is
+        // strictly finer-grained than `author.time`'s one-second resolution
+        // — with `id` only as a last-resort tiebreak for the practically
+        // unreachable case of two replies landing on the same nanosecond.
         replies.sort_by(|a, b| {
-            a.author
-                .time
-                .seconds
-                .cmp(&b.author.time.seconds)
+            a.created_at
+                .cmp(&b.created_at)
                 .then_with(|| a.id.cmp(&b.id))
         });
 
@@ -440,6 +449,7 @@ impl<'r> Comments<'r> {
             parent,
             state: State::from_store(note.state.as_deref()),
             commit: note.commit,
+            created_at: note.created_at,
         })
     }
 }
