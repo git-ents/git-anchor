@@ -114,5 +114,8 @@ pub use anchor::{Anchor, LineRange, capture, capture_worktree, snippet};
 pub use binding::{Binding, EvalState, Validity, revalidate};
 pub use diff::{TreeChange, diff_trees};
 pub use error::{Error, Result};
-pub use projection::{Projection, project, project_exact, project_from_context, project_worktree};
+pub use projection::{
+    Content, PROJECTION_HEURISTIC_VERSION, Position, Projection, project, project_candidates,
+    project_exact, project_from_context, project_many, project_worktree,
+};
 pub use store::{Store, StoredNote};

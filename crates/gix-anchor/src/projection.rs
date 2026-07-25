@@ -67,6 +67,98 @@ impl Projection {
             Self::Deleted => "deleted",
         }
     }
+
+    /// Decompose `self` into its two independent axes: whether the anchored
+    /// region *moved* ([`Position`]) and whether it was *edited*
+    /// ([`Content`]). [`Projection`] conflates both into one four-valued
+    /// outcome; a policy consumer deciding, say, whether a review carries
+    /// forward needs to ask the two questions separately -- a span that
+    /// moved but is textually intact is a very different case from one that
+    /// stayed put but was edited, and a flat `Projection` cannot distinguish
+    /// them from its label alone.
+    ///
+    /// Takes `anchor`: [`Self::Relocated`] and [`Self::Outdated`] each carry
+    /// only the *destination* path, and telling a rename (a new [`Position`])
+    /// apart from an in-place edit (the same one) means comparing it against
+    /// the anchor's own [`Anchor::path`]. That comparison is exact, not an
+    /// approximation -- [`project_exact`]'s tree diff, with rename tracking,
+    /// already decided the destination path precisely when it built `self`,
+    /// so this recovers that decision rather than guessing at it. Callers
+    /// should use this method rather than comparing paths themselves.
+    #[must_use]
+    pub fn axes(&self, anchor: &Anchor) -> (Position, Content) {
+        match self {
+            Self::Current => (Position::Same, Content::Intact),
+            Self::Relocated { path, .. } => (Position::of(path, &anchor.path), Content::Intact),
+            Self::Outdated { path } => (Position::of(path, &anchor.path), Content::Edited),
+            Self::Deleted => (Position::Lost, Content::None),
+        }
+    }
+}
+
+/// Whether an anchored region sits where it was captured -- the position
+/// half of [`Projection::axes`]'s decomposition; [`Content`] is the other
+/// half, and the two vary independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    /// The anchor's file sits at the same path it was captured against.
+    Same,
+    /// The anchor's file sits at a different path.
+    Moved,
+    /// The anchor's file no longer exists in the target tree.
+    Lost,
+}
+
+impl Position {
+    /// `Same` when `path` (a projection's destination) equals `anchor_path`
+    /// (the anchor's own path), `Moved` otherwise.
+    fn of(path: &str, anchor_path: &str) -> Self {
+        if path == anchor_path {
+            Self::Same
+        } else {
+            Self::Moved
+        }
+    }
+
+    /// The axis's canonical lowercase keyword -- part of the same porcelain
+    /// vocabulary [`Projection::label`] documents (`same`, `moved`, `lost`).
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Same => "same",
+            Self::Moved => "moved",
+            Self::Lost => "lost",
+        }
+    }
+}
+
+/// Whether an anchored region's own text is unchanged -- the content half of
+/// [`Projection::axes`]'s decomposition; [`Position`] is the other half, and
+/// the two vary independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Content {
+    /// The anchored lines (or, for a whole-file anchor, the whole file) are
+    /// byte-identical to what [`crate::capture`] recorded.
+    Intact,
+    /// The file survives but the anchored region itself was edited.
+    Edited,
+    /// There is no content to speak of. Legal only paired with
+    /// [`Position::Lost`] -- every other [`Projection`] outcome names a
+    /// surviving file, edited or not.
+    None,
+}
+
+impl Content {
+    /// The axis's canonical lowercase keyword -- part of the same porcelain
+    /// vocabulary [`Projection::label`] documents (`intact`, `edited`, `none`).
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Intact => "intact",
+            Self::Edited => "edited",
+            Self::None => "none",
+        }
+    }
 }
 
 /// Project `anchor` onto `target` (a revision in `repo`), degrading to
@@ -80,6 +172,23 @@ impl Projection {
 /// and [`Projection::Deleted`], is a fresh [`Projection`] value, and the
 /// anchor itself remains displayable regardless of the outcome
 /// (`anchor.fuzzy-fallback`).
+///
+/// # Unsuitable for caching or gating
+///
+/// The fallback to [`project_from_context`] triggers on whether `anchor`'s
+/// own commit is still reachable in the object database -- ambient
+/// garbage-collection state that is neither content-addressed nor a ref, so
+/// it cannot be captured in any cache key and does not correspond to any
+/// input a gate could pin. Concretely: a renamed file reports
+/// [`Projection::Relocated`] through this function before a `git gc` runs
+/// and [`Projection::Deleted`] after one, with `anchor` and `target`
+/// unchanged, because [`project_from_context`] does no rename tracking at
+/// all (its own doc comment says so). Any caller that caches `project`'s
+/// result, or gates a decision on it, is therefore caching or gating on
+/// whether maintenance happened to run. Call [`project_exact`] or
+/// [`project_from_context`] explicitly instead, so the choice of heuristic
+/// -- and its version, [`PROJECTION_HEURISTIC_VERSION`] -- is itself part of
+/// what the caller committed to.
 ///
 /// # Examples
 ///
@@ -102,6 +211,17 @@ pub fn project(repo: &gix::Repository, anchor: &Anchor, target: &str) -> Result<
     }
 }
 
+/// Version of [`project_exact`]'s rename-detection and hunk-mapping
+/// heuristics. Bump this on **any** behavior change to either — not just a
+/// deliberate tuning change, but also a `gix` upgrade that changes what its
+/// diff or rewrite-tracking produces for the same inputs. Downstream callers
+/// that cache a projection (or a value derived from one) fold this into
+/// their cache key alongside the data inputs; a `Projection` that starts
+/// coming back different for the same `(Anchor, target)` pair without this
+/// bumping poisons every cache entry computed under the old behavior, since
+/// nothing else in the inputs changed to invalidate them.
+pub const PROJECTION_HEURISTIC_VERSION: u32 = 1;
+
 /// Project `anchor` onto `target` by diffing `anchor`'s own commit tree
 /// against `target`'s, with rename tracking, and mapping the line range
 /// through the blob diff's hunks — shifted past edits that land entirely
@@ -112,12 +232,118 @@ pub fn project(repo: &gix::Repository, anchor: &Anchor, target: &str) -> Result<
 /// `anchor.retention`); [`project`] catches exactly this and retries with
 /// [`project_from_context`], which needs no commit at all.
 pub fn project_exact(repo: &gix::Repository, anchor: &Anchor, target: &str) -> Result<Projection> {
-    let anchor_blob = anchor.blob();
-    let anchor_commit_id = anchor.commit();
     let target_commit = resolve_commit(repo, target)?;
     let target_tree = target_commit
         .tree()
         .map_err(|error| Error::Object(error.to_string()))?;
+    project_exact_onto(repo, anchor, &target_tree)
+}
+
+/// Project `anchors` onto `target` in a single pass, resolving `target`'s
+/// tree once for the whole batch rather than once per anchor — the
+/// difference between linear and quadratic when a caller (a fixpoint
+/// evaluator revisiting every anchor at one revision, for instance) needs
+/// [`project_exact`] for a large anchor set at the same `target`.
+///
+/// Returns one [`Result`] per anchor, in the same order as `anchors`, each
+/// identical to what calling [`project_exact`] on that anchor alone would
+/// have returned; only the shared, up-front `target` resolution differs.
+pub fn project_many(
+    repo: &gix::Repository,
+    anchors: &[Anchor],
+    target: &str,
+) -> Result<Vec<Result<Projection>>> {
+    let target_commit = resolve_commit(repo, target)?;
+    let target_tree = target_commit
+        .tree()
+        .map_err(|error| Error::Object(error.to_string()))?;
+    Ok(anchors
+        .iter()
+        .map(|anchor| project_exact_onto(repo, anchor, &target_tree))
+        .collect())
+}
+
+/// Every path in `target`'s tree [`project_exact`] could equally justify as
+/// `anchor`'s destination, for the case [`project_exact`] itself cannot
+/// represent: `anchor`'s content surviving intact at more than one path (a
+/// duplicate or an untracked copy). Multiplicity *is* the ambiguity — there
+/// is deliberately no `Ambiguous` variant, so a caller that cares checks
+/// `project_candidates(..).len() > 1` rather than being handed a status that
+/// already discarded which candidates existed. A result of length one always
+/// agrees exactly with [`project_exact`].
+///
+/// Only [`Projection::Current`] and [`Projection::Relocated`] can yield more
+/// than one candidate — content survives intact in both, which is the only
+/// circumstance under which the same bytes can legitimately sit at more than
+/// one path. [`Projection::Outdated`] and [`Projection::Deleted`] each name
+/// exactly one destination (or none), so both pass through as the sole
+/// element of a one-long vector, identical to [`project_exact`].
+pub fn project_candidates(
+    repo: &gix::Repository,
+    anchor: &Anchor,
+    target: &str,
+) -> Result<Vec<Projection>> {
+    let target_commit = resolve_commit(repo, target)?;
+    let target_tree = target_commit
+        .tree()
+        .map_err(|error| Error::Object(error.to_string()))?;
+    let primary = project_exact_onto(repo, anchor, &target_tree)?;
+
+    let (needle, lines) = match &primary {
+        Projection::Current => (anchor.blob(), anchor.lines),
+        Projection::Relocated { path, lines } => {
+            let id = target_tree
+                .lookup_entry_by_path(path)
+                .map_err(|error| Error::Object(error.to_string()))?
+                .ok_or_else(|| Error::MissingPath {
+                    commit: target_commit.id().detach(),
+                    path: path.clone(),
+                })?
+                .object_id();
+            (id, *lines)
+        }
+        Projection::Outdated { .. } | Projection::Deleted => return Ok(vec![primary]),
+    };
+
+    let anchor_blob = anchor.blob();
+    let mut candidates: Vec<(String, Projection)> = target_tree
+        .traverse()
+        .breadthfirst
+        .files()
+        .map_err(|error| Error::Object(error.to_string()))?
+        .into_iter()
+        .filter(|entry| entry.mode.is_blob() && entry.oid == needle)
+        .map(|entry| {
+            let path = entry.filepath.to_str_lossy().into_owned();
+            let projection = if path == anchor.path && entry.oid == anchor_blob {
+                Projection::Current
+            } else {
+                Projection::Relocated {
+                    path: path.clone(),
+                    lines,
+                }
+            };
+            (path, projection)
+        })
+        .collect();
+    candidates.sort_by(|(a, _), (b, _)| a.cmp(b));
+    Ok(candidates
+        .into_iter()
+        .map(|(_, projection)| projection)
+        .collect())
+}
+
+/// [`project_exact`]'s implementation, taking an already-resolved
+/// `target_tree` so [`project_many`] and [`project_candidates`] can share
+/// one tree resolution across a batch or a follow-up scan instead of each
+/// re-resolving `target` from scratch.
+fn project_exact_onto(
+    repo: &gix::Repository,
+    anchor: &Anchor,
+    target_tree: &gix::Tree<'_>,
+) -> Result<Projection> {
+    let anchor_blob = anchor.blob();
+    let anchor_commit_id = anchor.commit();
 
     if let Some(entry) = target_tree
         .lookup_entry_by_path(&anchor.path)
@@ -141,7 +367,7 @@ pub fn project_exact(repo: &gix::Repository, anchor: &Anchor, target: &str) -> R
     // out.
     let options = gix::diff::Options::default().with_rewrites(Some(gix::diff::Rewrites::default()));
     let changes = repo
-        .diff_tree_to_tree(Some(&anchor_tree), Some(&target_tree), options)
+        .diff_tree_to_tree(Some(&anchor_tree), Some(target_tree), options)
         .map_err(|error| Error::Diff(error.to_string()))?;
 
     // Find where the anchored path went: its old-side location is
@@ -474,6 +700,65 @@ mod tests {
         assert_eq!(projection.label(), expected);
     }
 
+    #[rstest]
+    #[case::same(Position::Same, "same")]
+    #[case::moved(Position::Moved, "moved")]
+    #[case::lost(Position::Lost, "lost")]
+    fn position_label_is_the_axis_keyword(#[case] position: Position, #[case] expected: &str) {
+        assert_eq!(position.label(), expected);
+    }
+
+    #[rstest]
+    #[case::intact(Content::Intact, "intact")]
+    #[case::edited(Content::Edited, "edited")]
+    #[case::none(Content::None, "none")]
+    fn content_label_is_the_axis_keyword(#[case] content: Content, #[case] expected: &str) {
+        assert_eq!(content.label(), expected);
+    }
+
+    /// [`Projection::axes`] over all four variants, including both the
+    /// same-path and moved-path forms of `Relocated` and `Outdated` -- the
+    /// two rows the position axis actually has to decide between.
+    #[rstest]
+    #[case::current(Projection::Current, Position::Same, Content::Intact)]
+    #[case::relocated_same_path(
+        Projection::Relocated { path: "file.txt".to_owned(), lines: None },
+        Position::Same,
+        Content::Intact
+    )]
+    #[case::relocated_moved_path(
+        Projection::Relocated { path: "moved.txt".to_owned(), lines: None },
+        Position::Moved,
+        Content::Intact
+    )]
+    #[case::outdated_same_path(
+        Projection::Outdated { path: "file.txt".to_owned() },
+        Position::Same,
+        Content::Edited
+    )]
+    #[case::outdated_moved_path(
+        Projection::Outdated { path: "moved.txt".to_owned() },
+        Position::Moved,
+        Content::Edited
+    )]
+    #[case::deleted(Projection::Deleted, Position::Lost, Content::None)]
+    fn axes_decompose_position_and_content(
+        #[case] projection: Projection,
+        #[case] expected_position: Position,
+        #[case] expected_content: Content,
+    ) {
+        let dir = repo();
+        std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
+        commit_all(dir.path(), "one");
+        let git_repo = gix::open(dir.path()).unwrap();
+        let anchor = capture(&git_repo, "HEAD", "file.txt", None).unwrap();
+
+        assert_eq!(
+            projection.axes(&anchor),
+            (expected_position, expected_content)
+        );
+    }
+
     /// One post-capture edit per taxonomy row of
     /// [`projection_reports_the_spec_outcomes`].
     #[derive(Debug, Clone, Copy)]
@@ -575,6 +860,73 @@ mod tests {
         // The umbrella entry point gives the identical answer while the
         // anchor commit exists.
         assert_eq!(project(&git_repo, &anchor, "HEAD").unwrap(), expected);
+    }
+
+    /// [`project_candidates`] over every taxonomy row of
+    /// [`projection_reports_the_spec_outcomes`] where nothing duplicates the
+    /// destination content: exactly one candidate, identical to
+    /// [`project_exact`]'s single answer.
+    #[rstest]
+    #[case::unchanged_is_current(Mutation::TouchOtherFile)]
+    #[case::edit_above_shifts(Mutation::PrependTwoLines)]
+    #[case::edit_inside_outdates(Mutation::EditLineFive)]
+    #[case::pure_rename_relocates(Mutation::Rename)]
+    #[case::rename_with_edit_above(Mutation::RenameAndPrependOneLine)]
+    #[case::deletion_is_deleted(Mutation::Delete)]
+    fn project_candidates_with_no_duplicate_agrees_with_project_exact(#[case] mutation: Mutation) {
+        let dir = repo();
+        std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
+        commit_all(dir.path(), "one");
+        let git_repo = gix::open(dir.path()).unwrap();
+        let anchor = capture(&git_repo, "HEAD", "file.txt", range(5, 6)).unwrap();
+
+        mutation.apply(dir.path());
+        commit_all(dir.path(), "two");
+        let git_repo = gix::open(dir.path()).unwrap();
+
+        let expected = project_exact(&git_repo, &anchor, "HEAD").unwrap();
+        assert_eq!(
+            project_candidates(&git_repo, &anchor, "HEAD").unwrap(),
+            vec![expected]
+        );
+    }
+
+    /// A blob whose exact bytes appear at two paths in the target tree --
+    /// [`project_exact`] can only report the one destination its tree diff
+    /// found, but [`project_candidates`] reports both, which is what makes
+    /// ambiguity representable at all (`git-query` derives it as a join over
+    /// candidates rather than needing an `Ambiguous` status here).
+    #[test]
+    fn project_candidates_reports_every_path_holding_the_same_content() {
+        let dir = repo();
+        std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
+        commit_all(dir.path(), "one");
+        let git_repo = gix::open(dir.path()).unwrap();
+        let anchor = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
+
+        // Duplicate the file's exact bytes at a second path; the original
+        // is left untouched, so this is an untracked copy rather than a
+        // rename `project_exact`'s diff would already have found.
+        std::fs::write(dir.path().join("copy.txt"), numbered(1..=10)).unwrap();
+        commit_all(dir.path(), "two");
+        let git_repo = gix::open(dir.path()).unwrap();
+
+        assert_eq!(
+            project_candidates(&git_repo, &anchor, "HEAD").unwrap(),
+            vec![
+                Projection::Relocated {
+                    path: "copy.txt".to_owned(),
+                    lines: range(3, 4),
+                },
+                Projection::Current,
+            ]
+        );
+        // project_exact, unable to represent the multiplicity, reports only
+        // the untouched original.
+        assert_eq!(
+            project_exact(&git_repo, &anchor, "HEAD").unwrap(),
+            Projection::Current
+        );
     }
 
     #[test]
@@ -698,6 +1050,86 @@ mod tests {
                 lines: range(7, 8),
             }
         );
+    }
+
+    /// Regression pinning the divergence `gix_anchor::project`'s doc comment
+    /// now warns callers about: for a genuine rename, [`project_exact`] and
+    /// [`project_from_context`] disagree once the anchor commit is gone,
+    /// because [`project_from_context`] does no rename tracking at all (its
+    /// own doc comment says so) and can only report the anchored path
+    /// deleted. This is documented behavior, not an incidental bug --
+    /// exactly why `project` (which silently picks between the two based on
+    /// ambient GC state) is unsuitable for a cached or gating caller.
+    #[test]
+    fn project_exact_and_project_from_context_diverge_on_a_rename_once_gcd() {
+        let dir = repo();
+        std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
+        commit_all(dir.path(), "one");
+        let git_repo = gix::open(dir.path()).unwrap();
+        let anchor = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
+
+        std::fs::rename(dir.path().join("file.txt"), dir.path().join("moved.txt")).unwrap();
+        commit_all(dir.path(), "two");
+        let git_repo = gix::open(dir.path()).unwrap();
+
+        // While the anchor commit is still present, project_exact tracks
+        // the rename via the tree diff.
+        assert_eq!(
+            project_exact(&git_repo, &anchor, "HEAD").unwrap(),
+            Projection::Relocated {
+                path: "moved.txt".to_owned(),
+                lines: range(3, 4),
+            }
+        );
+
+        // Once it's gone -- simulated gc, same as elsewhere in this suite --
+        // project_exact fails outright, and project_from_context, with no
+        // commit tree to diff against, reports the anchored path Deleted
+        // for the exact same rename.
+        let gcd = with_missing_commit(&anchor);
+        assert!(matches!(
+            project_exact(&git_repo, &gcd, "HEAD"),
+            Err(Error::AnchorCommitMissing(_))
+        ));
+        assert_eq!(
+            project_from_context(&git_repo, &gcd, "HEAD").unwrap(),
+            Projection::Deleted
+        );
+    }
+
+    /// [`project_many`] must agree with calling [`project_exact`] once per
+    /// anchor -- the only thing it changes is resolving `target`'s tree
+    /// once for the whole batch instead of once per anchor.
+    #[test]
+    fn project_many_agrees_with_project_exact_per_anchor() {
+        let dir = repo();
+        std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
+        std::fs::write(dir.path().join("other.txt"), numbered(1..=10)).unwrap();
+        commit_all(dir.path(), "one");
+        let git_repo = gix::open(dir.path()).unwrap();
+        let anchor_edited_above = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
+        let anchor_deleted = capture(&git_repo, "HEAD", "other.txt", range(5, 6)).unwrap();
+        let anchor_whole_file = capture(&git_repo, "HEAD", "file.txt", None).unwrap();
+
+        std::fs::write(
+            dir.path().join("file.txt"),
+            format!("added a\nadded b\n{}", numbered(1..=10)),
+        )
+        .unwrap();
+        std::fs::remove_file(dir.path().join("other.txt")).unwrap();
+        std::fs::write(dir.path().join("unrelated.txt"), "different\n").unwrap();
+        commit_all(dir.path(), "two");
+        let git_repo = gix::open(dir.path()).unwrap();
+
+        let anchors = vec![anchor_edited_above, anchor_deleted, anchor_whole_file];
+        let batched = project_many(&git_repo, &anchors, "HEAD").unwrap();
+        assert_eq!(batched.len(), anchors.len());
+        for (anchor, result) in anchors.iter().zip(batched) {
+            assert_eq!(
+                result.unwrap(),
+                project_exact(&git_repo, anchor, "HEAD").unwrap()
+            );
+        }
     }
 
     #[test]
