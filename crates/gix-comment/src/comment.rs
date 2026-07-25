@@ -91,9 +91,14 @@ impl<'r> Comments<'r> {
         message: &str,
         attachment: Option<ObjectId>,
     ) -> Result<ObjectId> {
+        // Use the message's first non-empty line as the storage commit's
+        // summary, so the comment is self-describing in plain git
+        // (`git log --oneline refs/anchors/…`) — not the store's generic
+        // `anchor <target>` default. The full message is still the body.
+        let summary = message.lines().find(|line| !line.trim().is_empty());
         Ok(self
             .store
-            .attach_with_attachment(binding, message.as_bytes(), attachment, None)?)
+            .attach_with_attachment(binding, message.as_bytes(), attachment, summary)?)
     }
 
     /// Every comment, or only those filed under `target`, oldest-id first.
