@@ -667,3 +667,209 @@ fn edit_keeps_existing_attachment_when_attach_not_given() {
         "edit without --attach should keep the existing attachment: {out}"
     );
 }
+
+#[test]
+fn reply_creates_a_distinct_id_that_shares_the_parents_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let (out, _, ok) = run(
+        path,
+        None,
+        &["add", "--path", "file.txt", "-L", "2,4", "-m", "root note"],
+    );
+    assert!(ok);
+    let root_id = out.trim().to_owned();
+
+    let (out, err, ok) = run(path, None, &["reply", &root_id, "-m", "a reply"]);
+    assert!(ok, "reply failed: {err}");
+    let reply_id = out.trim().to_owned();
+    assert_ne!(reply_id, root_id, "a reply has its own identity");
+
+    let (out, err, ok) = run(path, None, &["show", &reply_id]);
+    assert!(ok, "show reply failed: {err}");
+    assert!(out.contains("a reply"), "show output: {out}");
+    assert!(
+        out.contains(&format!("parent: {root_id}")),
+        "show output: {out}"
+    );
+    assert!(out.contains("binding: position"), "show output: {out}");
+}
+
+#[test]
+fn reply_to_a_missing_id_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let (_, err, ok) = run(path, None, &["reply", "0123456789", "-m", "x"]);
+    assert!(!ok, "reply to a missing id should fail");
+    assert!(err.contains("no comment matches"), "stderr: {err}");
+}
+
+#[test]
+fn resolve_and_reopen_round_trip_and_show_reports_state() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let (out, _, ok) = run(path, None, &["add", "-m", "needs review"]);
+    assert!(ok);
+    let id = out.trim().to_owned();
+
+    let (out, err, ok) = run(path, None, &["show", &id]);
+    assert!(ok, "show failed: {err}");
+    assert!(out.contains("state: open"), "show output: {out}");
+
+    let (out, err, ok) = run(path, None, &["resolve", &id]);
+    assert!(ok, "resolve failed: {err}");
+    assert_eq!(out.trim(), id, "resolve reattaches the same identity");
+
+    let (out, err, ok) = run(path, None, &["show", &id]);
+    assert!(ok, "show failed: {err}");
+    assert!(out.contains("state: resolved"), "show output: {out}");
+    assert!(out.contains("needs review"), "message unchanged: {out}");
+
+    let (out, err, ok) = run(path, None, &["reopen", &id]);
+    assert!(ok, "reopen failed: {err}");
+    assert_eq!(out.trim(), id, "reopen reattaches the same identity");
+
+    let (out, err, ok) = run(path, None, &["show", &id]);
+    assert!(ok, "show failed: {err}");
+    assert!(out.contains("state: open"), "show output: {out}");
+}
+
+#[test]
+fn show_thread_prints_root_then_replies_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let (out, _, ok) = run(path, None, &["add", "-m", "root message"]);
+    assert!(ok);
+    let root_id = out.trim().to_owned();
+    let (_, _, ok) = run(path, None, &["reply", &root_id, "-m", "first reply"]);
+    assert!(ok);
+    let (_, _, ok) = run(path, None, &["reply", &root_id, "-m", "second reply"]);
+    assert!(ok);
+
+    let (out, err, ok) = run(path, None, &["show", &root_id, "--thread"]);
+    assert!(ok, "show --thread failed: {err}");
+    let root_pos = out.find("root message").expect("root message present");
+    let first_pos = out.find("first reply").expect("first reply present");
+    let second_pos = out.find("second reply").expect("second reply present");
+    assert!(
+        root_pos < first_pos,
+        "root should print before replies: {out}"
+    );
+    assert!(
+        first_pos < second_pos,
+        "replies should print oldest first: {out}"
+    );
+
+    let (out, err, ok) = run(path, None, &["show", &root_id, "--thread", "--json"]);
+    assert!(ok, "show --thread --json failed: {err}");
+    let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 3, "root + two replies: {out}");
+}
+
+#[test]
+fn show_thread_conflicts_with_worktree_and_with_a_rev_suffix() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let (out, _, ok) = run(path, None, &["add", "-m", "root"]);
+    assert!(ok);
+    let id = out.trim().to_owned();
+
+    let (_, err, ok) = run(path, None, &["show", &format!("{id}@HEAD"), "--thread"]);
+    assert!(!ok, "--thread with an @<rev> suffix should fail");
+    assert!(err.contains("--thread"), "stderr: {err}");
+
+    let (_, err, ok) = run(path, None, &["show", &id, "--thread", "--worktree"]);
+    assert!(!ok, "--thread with --worktree should fail");
+    assert!(
+        err.contains("thread") || err.contains("cannot be used"),
+        "stderr: {err}"
+    );
+}
+
+#[test]
+fn list_defaults_to_open_roots_and_resolved_or_all_widen_it() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let (out, _, ok) = run(path, None, &["add", "-m", "open root"]);
+    assert!(ok);
+    let open_id = out.trim().to_owned();
+
+    let (out, _, ok) = run(
+        path,
+        None,
+        &["add", "--path", "file.txt", "-m", "resolved root"],
+    );
+    assert!(ok);
+    let resolved_id = out.trim().to_owned();
+    let (_, _, ok) = run(path, None, &["resolve", &resolved_id]);
+    assert!(ok);
+
+    let (_, _, ok) = run(path, None, &["reply", &open_id, "-m", "a reply"]);
+    assert!(ok);
+
+    // Default: open roots only.
+    let (out, err, ok) = run(path, None, &["list"]);
+    assert!(ok, "list failed: {err}");
+    assert!(out.contains(&open_id[..8]), "list output: {out}");
+    assert!(
+        !out.contains(&resolved_id[..8]),
+        "resolved root should be hidden by default: {out}"
+    );
+
+    // `--resolved`: every root regardless of state, but still no replies.
+    let (out, err, ok) = run(path, None, &["list", "--resolved"]);
+    assert!(ok, "list --resolved failed: {err}");
+    assert!(out.contains(&open_id[..8]), "list --resolved output: {out}");
+    assert!(
+        out.contains(&resolved_id[..8]),
+        "list --resolved output: {out}"
+    );
+
+    // `--all`: every comment, roots and replies alike.
+    let (out, err, ok) = run(path, None, &["list", "--all"]);
+    assert!(ok, "list --all failed: {err}");
+    let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 3, "open root + resolved root + reply: {out}");
+}
+
+#[test]
+fn list_json_carries_state_and_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let (out, _, ok) = run(path, None, &["add", "-m", "root"]);
+    assert!(ok);
+    let root_id = out.trim().to_owned();
+    let (out, _, ok) = run(path, None, &["reply", &root_id, "-m", "reply"]);
+    assert!(ok);
+    let reply_id = out.trim().to_owned();
+
+    let (out, err, ok) = run(path, None, &["list", "--all", "--json"]);
+    assert!(ok, "list --all --json failed: {err}");
+    assert!(out.contains("\"state\":\"open\""), "list --json: {out}");
+    assert!(
+        out.contains(&format!("\"parent\":\"{root_id}\"")),
+        "list --json should carry the reply's parent: {out}"
+    );
+
+    let (out, err, ok) = run(path, None, &["show", &reply_id, "--json"]);
+    assert!(ok, "show --json failed: {err}");
+    assert!(out.contains("\"state\":\"open\""), "show --json: {out}");
+    assert!(
+        out.contains(&format!("\"parent\":\"{root_id}\"")),
+        "show --json should carry the reply's parent: {out}"
+    );
+}

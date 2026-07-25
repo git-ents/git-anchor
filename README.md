@@ -10,7 +10,8 @@ Four crates — the anchor primitive and its CLI, plus a first consumer (comment
 - [`git-anchor`](crates/git-anchor) — a git external subcommand (`git anchor …`).
 - [`gix-comment`](crates/gix-comment) — a thin library over `gix-anchor`: a
   message pinned to any anchor, whose author and timestamp are the storage
-  commit's, plus an optional raw-tree attachment.
+  commit's, plus an optional raw-tree attachment, reply threads, and a
+  resolvable open/resolved state.
 - [`git-comment`](crates/git-comment) — a git external subcommand
   (`git comment …`).
 

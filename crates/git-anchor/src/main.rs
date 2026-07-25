@@ -362,7 +362,7 @@ fn cmd_show(
                     history.len()
                 )
             })?;
-            let versioned = store.get_at(commit)?;
+            let versioned = store.get_at(note.id, commit)?;
             show_note(&versioned, json)
         }
         ShowSelector::Tip if worktree => show_worktree(repo, &note, json),

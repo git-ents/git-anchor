@@ -1,26 +1,48 @@
 //! [`Store`]: notes — arbitrary content attached to a [`Binding`]'s
 //! target — persisted as Git refs and commits, git-notes style.
 //!
-//! One ref per (target, binding-identity) pair, at
-//! `refs/anchors/<target-hex>/<binding-oid-hex>`: attaching again to the
-//! same binding commits a new version forward onto the same ref, so editing
-//! a note keeps its full history rather than overwriting it. The identity
-//! oid is the binding's own serialized tree oid — deterministic and
-//! content-addressed on the binding, not on the attached body — so the same
-//! binding always resolves to the same ref regardless of which process
-//! attached it first.
+//! Two identity schemes share this one engine, selected by which write
+//! method a caller uses:
+//!
+//! - **Binding-keyed** ([`Store::attach`] / [`Store::attach_with_attachment`]):
+//!   one ref per (target, binding-identity) pair, at
+//!   `<prefix>/<target-hex>/<binding-oid-hex>` — attaching again to the same
+//!   binding commits a new version forward onto the same ref, so editing a
+//!   note keeps its full history rather than overwriting it. The identity
+//!   oid is the binding's own serialized tree oid — deterministic and
+//!   content-addressed on the binding, not on the attached body — so the
+//!   same binding always resolves to the same ref regardless of which
+//!   process attached it first.
+//! - **Genesis-keyed** ([`Store::create`] / [`Store::update`]): one ref per
+//!   note *instance*, at `<prefix>/<target-hex>/<genesis-commit-oid>`. The
+//!   identity oid is the oid of the parentless commit [`Store::create`]
+//!   writes — never the binding's — so two notes about the same binding (a
+//!   reply and the comment it replies to, say) get distinct identities
+//!   instead of colliding onto one ref. [`Store::update`] commits a new
+//!   version forward by that id, the genesis-keyed counterpart to
+//!   re-[`Store::attach`]ing.
+//!
+//! [`Store::with_prefix`] picks where either scheme's refs live;
+//! [`Store::open`] is shorthand for `with_prefix(repo, "refs/anchors")`. Every
+//! note document also carries two fields, `parent` and `state`, that this
+//! crate treats as opaque (`None` for [`Store::attach`] /
+//! [`Store::attach_with_attachment`]) — a downstream consumer such as
+//! `gix-comment` uses them to build reply threads and a resolvable lifecycle
+//! on top of this one storage engine, without this crate needing to know
+//! their vocabulary.
 
 use std::time::Duration;
 
 use facet::Facet;
 use facet_git_tree::RawTree;
 use gix::ObjectId;
+use gix::refs::transaction::PreviousValue;
 
 use crate::binding::Binding;
 use crate::error::{Error, Result};
 use crate::refname::check_hex_component;
 
-/// Where note refs live: `refs/anchors/<target-hex>/<binding-oid-hex>`.
+/// [`Store::open`]'s default prefix: `refs/anchors/<target-hex>/<id-hex>`.
 const ANCHOR_PREFIX: &str = "refs/anchors";
 /// Our per-ref lock files live under `<git-dir>/<LOCK_DIR>/`, kept separate
 /// from git's own `<ref>.lock` so holding one never blocks gix's own ref
@@ -34,34 +56,54 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CAS_ATTEMPTS: u32 = 8;
 
 /// The document committed at a note's ref: an arbitrary attached `body`, the
-/// [`Binding`] it is attached to, and an optional `attachment` tree — all
-/// embedded by tree id (`anchor.retention`) so the anchor's own content and
-/// context blobs, and any attached tree, stay reachable through the note's
-/// own tree.
+/// [`Binding`] it is attached to, an optional `attachment` tree, and two
+/// opaque bookkeeping fields — all embedded by tree id (`anchor.retention`)
+/// so the anchor's own content and context blobs, and any attached tree,
+/// stay reachable through the note's own tree.
 ///
 /// `attachment` is opaque to this crate: it is an arbitrary tree the caller
-/// hands to [`Store::attach_with_attachment`], embedded verbatim as a
-/// [`RawTree`] passthrough so it survives gc through the note's ref the same
-/// way the binding's own blobs do. A downstream consumer (a `Comment`, say)
-/// uses it to hang extra content off a note without this crate needing to
-/// know that content's shape.
+/// hands to [`Store::attach_with_attachment`] (or, genesis-keyed,
+/// [`Store::create`]/[`Store::update`]), embedded verbatim as a [`RawTree`]
+/// passthrough so it survives gc through the note's ref the same way the
+/// binding's own blobs do. A downstream consumer (a `Comment`, say) uses it
+/// to hang extra content off a note without this crate needing to know that
+/// content's shape.
+///
+/// `parent` and `state` are likewise opaque: [`Store::create`] and
+/// [`Store::update`] pass them through verbatim as caller-supplied strings —
+/// conventionally an upstream note's hex id, and a free-form lifecycle tag,
+/// respectively — never interpreting them. [`Store::attach`] and
+/// [`Store::attach_with_attachment`] always write `None` for both; the
+/// fields exist for a genesis-keyed caller's reply/resolve vocabulary, not
+/// the binding-keyed scheme.
 #[derive(Facet)]
 struct Note {
     body: Vec<u8>,
     binding: RawTree,
     attachment: Option<RawTree>,
+    parent: Option<String>,
+    state: Option<String>,
 }
 
 /// A content-addressed store of notes over a `gix` repository, git-notes
-/// style: one note per [`Binding`] identity, editable with full history.
+/// style: one note per identity (binding- or genesis-keyed, depending on
+/// which write method is used), editable with full history.
 pub struct Store<'r> {
     repo: &'r gix::Repository,
+    /// Where this store's refs live: `<prefix>/<target-hex>/<id-hex>`.
+    /// [`Store::open`] fixes this at [`ANCHOR_PREFIX`]; [`Store::with_prefix`]
+    /// lets a caller such as `gix-comment` root the same engine at its own
+    /// namespace (`refs/comments`) instead.
+    prefix: &'static str,
 }
 
 /// A note read back from the [`Store`].
 pub struct StoredNote {
-    /// The note's identity oid — the binding's own serialized tree oid, and
-    /// the ref-path leaf.
+    /// The note's identity oid — the ref-path leaf. For a binding-keyed note
+    /// ([`Store::attach`] / [`Store::attach_with_attachment`]) this equals
+    /// the binding's own serialized tree oid; for a genesis-keyed note
+    /// ([`Store::create`] / [`Store::update`]) it is the parentless commit
+    /// oid [`Store::create`] minted, independent of the binding.
     pub id: ObjectId,
     /// [`Binding::target`] — the ref-path grouping key.
     pub target: ObjectId,
@@ -72,9 +114,19 @@ pub struct StoredNote {
     /// The latest version's commit summary (first line of the message).
     pub message: String,
     /// The optional attachment tree embedded alongside the note, as handed
-    /// to [`Store::attach_with_attachment`] — `None` for a note attached with
-    /// the plain [`Store::attach`].
+    /// to [`Store::attach_with_attachment`] (or [`Store::create`] /
+    /// [`Store::update`]) — `None` for a note attached or created with no
+    /// attachment.
     pub attachment: Option<ObjectId>,
+    /// An upstream note's id (conventionally hex), opaque to this crate —
+    /// `None` for a binding-keyed note, or a genesis-keyed note with no
+    /// parent. A caller such as `gix-comment` uses this to link a reply to
+    /// what it replies to.
+    pub parent: Option<String>,
+    /// A free-form lifecycle tag, opaque to this crate — `None` unless a
+    /// caller such as `gix-comment` set one (an open/resolved state, say)
+    /// via [`Store::create`] or [`Store::update`].
+    pub state: Option<String>,
     /// The commit this note was read from — a note ref's tip for
     /// [`Store::get`] / [`Store::list`], or the requested commit for
     /// [`Store::get_at`]. Its author and time are the note's author and
@@ -86,7 +138,17 @@ impl<'r> Store<'r> {
     /// Open a store over `repo` with the default `refs/anchors` prefix.
     #[must_use]
     pub fn open(repo: &'r gix::Repository) -> Store<'r> {
-        Store { repo }
+        Store::with_prefix(repo, ANCHOR_PREFIX)
+    }
+
+    /// Open a store over `repo` rooted at `prefix` instead of the default
+    /// `refs/anchors` — the same engine (locking, CAS, codec, both identity
+    /// schemes), a different ref namespace, so a downstream consumer (a
+    /// `gix-comment` at `refs/comments`, say) gets its own non-colliding tree
+    /// of refs without duplicating any of this crate's storage logic.
+    #[must_use]
+    pub fn with_prefix(repo: &'r gix::Repository, prefix: &'static str) -> Store<'r> {
+        Store { repo, prefix }
     }
 
     /// Attach `body` to the object `binding` names, git-notes style: one
@@ -95,7 +157,7 @@ impl<'r> Store<'r> {
     /// The identity oid — `binding`'s own serialized tree oid — is
     /// deterministic and content-addressed on the binding alone, never on
     /// `body`, so re-attaching to the same binding commits a new version
-    /// forward onto the same ref (`refs/anchors/<target>/<id>`) instead of
+    /// forward onto the same ref (`<prefix>/<target>/<id>`) instead of
     /// forking it. `message` sets the commit summary; when `None`, a default
     /// `anchor <target>` summary is used.
     ///
@@ -129,7 +191,9 @@ impl<'r> Store<'r> {
     /// Returns the note's identity oid, exactly as [`Store::attach`] does —
     /// the attachment is part of the note's *body document*, not its
     /// identity, so re-attaching the same binding with a different attachment
-    /// still commits forward onto the same ref.
+    /// still commits forward onto the same ref. `parent` and `state` are
+    /// always written `None` — the binding-keyed scheme has no use for
+    /// either; a caller that needs them wants [`Store::create`] instead.
     ///
     /// # Errors
     ///
@@ -150,13 +214,135 @@ impl<'r> Store<'r> {
             body: body.to_vec(),
             binding: RawTree::new(id),
             attachment: attachment.map(RawTree::new),
+            parent: None,
+            state: None,
         };
         let tree = facet_git_tree::serialize_into(&note, &self.repo.objects)?;
 
-        let refname = anchor_ref(target, id);
+        let refname = self.anchor_ref(target, id);
         let default_summary = format!("anchor {target}");
         let summary = message.unwrap_or(&default_summary);
         self.commit_forward(&refname, summary, tree)?;
+        Ok(id)
+    }
+
+    /// Create a genesis-keyed note: `body` (plus an optional `attachment`,
+    /// `parent`, and `state`, all opaque to this crate) attached to whatever
+    /// `binding` names, but under a *fresh* identity rather than the
+    /// binding's own oid.
+    ///
+    /// The identity is the oid of the parentless commit this method writes
+    /// — never derived from `binding` — so calling this twice with the same
+    /// binding creates two distinct notes at two distinct refs
+    /// (`<prefix>/<target>/<genesis-1>`, `<prefix>/<target>/<genesis-2>`)
+    /// rather than versioning one forward. That is the point: a caller such
+    /// as `gix-comment` uses it so a reply and the comment it replies to —
+    /// both about the same binding — never collide onto one ref, and two
+    /// people can comment on the same line without contending for the same
+    /// identity. Re-editing a genesis-keyed note by id is
+    /// [`Store::update`]'s job, not this one's.
+    ///
+    /// `message` sets the commit summary (unlike [`Store::attach`], there is
+    /// no default to fall back to — a genesis-keyed caller always has one to
+    /// give, e.g. a comment's own first line).
+    ///
+    /// Returns the new note's identity oid (the genesis commit's own oid).
+    ///
+    /// # Errors
+    ///
+    /// Propagates a [`Binding::serialize_into`] or `Note` serialization
+    /// failure, any underlying `gix` commit- or ref-write failure
+    /// ([`Error::Git`]), and [`Error::InvalidRefComponent`] on the
+    /// (practically unreachable) chance `target` or the minted genesis oid
+    /// cannot be used as a ref-name segment.
+    pub fn create(
+        &self,
+        binding: &Binding,
+        body: &[u8],
+        attachment: Option<ObjectId>,
+        parent: Option<String>,
+        state: Option<String>,
+        message: &str,
+    ) -> Result<ObjectId> {
+        let target = binding.target();
+        check_hex_component("target", &target.to_string())?;
+        let binding_id = binding.serialize_into(&self.repo.objects)?;
+
+        let note = Note {
+            body: body.to_vec(),
+            binding: RawTree::new(binding_id),
+            attachment: attachment.map(RawTree::new),
+            parent,
+            state,
+        };
+        let tree = facet_git_tree::serialize_into(&note, &self.repo.objects)?;
+
+        // A parentless commit written directly to the object database, with
+        // no ref pointing at it yet: its own oid — unpredictable ahead of
+        // time, unlike the binding-keyed scheme's deterministic id — becomes
+        // this note's genesis identity once the ref below is created.
+        let commit = self
+            .repo
+            .new_commit(message, tree, std::iter::empty::<ObjectId>())
+            .map_err(Error::git)?;
+        let genesis = commit.id;
+        check_hex_component("id", &genesis.to_string())?;
+
+        let refname = self.anchor_ref(target, genesis);
+        self.repo
+            .reference(
+                refname.as_str(),
+                genesis,
+                PreviousValue::MustNotExist,
+                message,
+            )
+            .map_err(Error::git)?;
+
+        Ok(genesis)
+    }
+
+    /// Commit a new version of the genesis-keyed note `id` forward onto its
+    /// own ref — the genesis-keyed counterpart to re-[`Store::attach`]ing:
+    /// same identity, a fresh `body`/`attachment`/`parent`/`state`, full
+    /// history preserved. The note's binding is carried forward unchanged
+    /// (it is read back off the ref's current tip); this method has no way
+    /// to change what a note is *about*, only its content.
+    ///
+    /// Returns `id` unchanged.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Resolve`] when no note with `id` exists — `update` names an
+    /// existing note, unlike [`Store::create`], which always makes a new
+    /// one. Otherwise propagates a `Note` serialization failure or
+    /// [`Error::CasExhausted`] when the per-ref compare-and-swap stays
+    /// contended past the retry budget.
+    pub fn update(
+        &self,
+        id: ObjectId,
+        body: &[u8],
+        attachment: Option<ObjectId>,
+        parent: Option<String>,
+        state: Option<String>,
+        message: &str,
+    ) -> Result<ObjectId> {
+        let Some(refname) = self.find_ref(id)? else {
+            return Err(Error::Resolve(id.to_string()));
+        };
+        let Some(tip) = self.tip(&refname)? else {
+            return Err(Error::Resolve(id.to_string()));
+        };
+        let binding_id = self.binding_oid_at(tip)?;
+
+        let note = Note {
+            body: body.to_vec(),
+            binding: RawTree::new(binding_id),
+            attachment: attachment.map(RawTree::new),
+            parent,
+            state,
+        };
+        let tree = facet_git_tree::serialize_into(&note, &self.repo.objects)?;
+        self.commit_forward(&refname, message, tree)?;
         Ok(id)
     }
 
@@ -169,8 +355,8 @@ impl<'r> Store<'r> {
     /// unrecognized stored [`Binding`] shape.
     pub fn list(&self, target: Option<ObjectId>) -> Result<Vec<StoredNote>> {
         let prefix = match target {
-            Some(target) => format!("{ANCHOR_PREFIX}/{target}/"),
-            None => format!("{ANCHOR_PREFIX}/"),
+            Some(target) => format!("{}/{target}/", self.prefix),
+            None => format!("{}/", self.prefix),
         };
         let mut out = Vec::new();
         for refname in self.refs_under(&prefix)? {
@@ -199,16 +385,21 @@ impl<'r> Store<'r> {
     /// Read the note document committed directly at `commit`, rather than
     /// at a ref's current tip — the version-history counterpart to
     /// [`Store::get`], for reading an older entry off [`Store::history`]'s
-    /// list (`git anchor show <id>~N`'s library hook).
+    /// list (`git anchor show <id>~N`'s library hook). `id` is the note's own
+    /// identity oid (the ref leaf), supplied by the caller rather than
+    /// recomputed, since a genesis-keyed note's identity cannot be recovered
+    /// from `commit` alone (unlike a binding-keyed note's, which is the
+    /// binding's own oid).
     ///
     /// # Errors
     ///
     /// Propagates a commit- or tree-read failure, and a malformed or
     /// unrecognized stored [`Binding`] shape. Does not check that `commit`
-    /// is actually reachable from any note ref — callers that need that
-    /// guarantee should check it against [`Store::history`] themselves.
-    pub fn get_at(&self, commit: ObjectId) -> Result<StoredNote> {
-        self.note_at_commit(commit)
+    /// is actually reachable from any note ref, nor that `id` is really the
+    /// note this `commit` belongs to — callers that need those guarantees
+    /// should check against [`Store::history`] themselves.
+    pub fn get_at(&self, id: ObjectId, commit: ObjectId) -> Result<StoredNote> {
+        self.note_at_commit(id, commit)
     }
 
     /// Delete a note's ref. Returns whether it existed.
@@ -248,6 +439,11 @@ impl<'r> Store<'r> {
 
     // ── internals ────────────────────────────────────────────────────────
 
+    /// `<prefix>/<target>/<id>`.
+    fn anchor_ref(&self, target: ObjectId, id: ObjectId) -> String {
+        format!("{}/{target}/{id}", self.prefix)
+    }
+
     /// The current object a ref points at, or `None` when the ref is absent.
     fn tip(&self, refname: &str) -> Result<Option<ObjectId>> {
         match self.repo.try_find_reference(refname).map_err(Error::git)? {
@@ -260,22 +456,28 @@ impl<'r> Store<'r> {
     }
 
     /// Read the note at `refname`'s tip, or `None` when the ref is absent.
+    /// The note's identity is the ref's own leaf segment, not anything
+    /// recomputed from its content — the same oid [`Store::find_ref`]
+    /// matched to land here, and, for a binding-keyed note, numerically
+    /// identical to the binding's own serialized tree oid anyway.
     fn read_note(&self, refname: &str) -> Result<Option<StoredNote>> {
         let Some(tip) = self.tip(refname)? else {
             return Ok(None);
         };
-        self.note_at_commit(tip).map(Some)
+        let id = leaf_id(refname)?;
+        self.note_at_commit(id, tip).map(Some)
     }
 
-    /// Read the note document committed at `commit` directly — shared by
-    /// [`Store::read_note`] (a ref's tip) and [`Store::get_at`] (any commit
-    /// off a note's history).
-    fn note_at_commit(&self, commit: ObjectId) -> Result<StoredNote> {
+    /// Read the note document committed at `commit` directly, under the
+    /// given identity `id` — shared by [`Store::read_note`] (a ref's tip,
+    /// `id` from the ref leaf) and [`Store::get_at`] (any commit off a
+    /// note's history, `id` from the caller).
+    fn note_at_commit(&self, id: ObjectId, commit: ObjectId) -> Result<StoredNote> {
         let commit_obj = self.repo.find_commit(commit).map_err(Error::git)?;
         let tree = commit_obj.tree_id().map_err(Error::git)?.detach();
         let note: Note = facet_git_tree::deserialize(&tree, &self.repo.objects)?;
-        let id = note.binding.oid();
-        let binding = Binding::deserialize(&id, &self.repo.objects)?;
+        let binding_id = note.binding.oid();
+        let binding = Binding::deserialize(&binding_id, &self.repo.objects)?;
         let target = binding.target();
         let message = gix_object::commit::MessageRef::from_bytes(commit_obj.message_raw_sloppy())
             .summary()
@@ -287,16 +489,30 @@ impl<'r> Store<'r> {
             body: note.body,
             message,
             attachment: note.attachment.map(|attachment| attachment.oid()),
+            parent: note.parent,
+            state: note.state,
             commit,
         })
     }
 
+    /// The oid of the note document's own `binding` entry at `commit`,
+    /// without decoding it into a full [`Binding`] — [`Store::update`]'s
+    /// helper for carrying an existing note's binding forward unchanged,
+    /// cheaper than round-tripping through [`Binding::deserialize`] and back
+    /// through [`Binding::serialize_into`] for a value that is not changing.
+    fn binding_oid_at(&self, commit: ObjectId) -> Result<ObjectId> {
+        let commit_obj = self.repo.find_commit(commit).map_err(Error::git)?;
+        let tree = commit_obj.tree_id().map_err(Error::git)?.detach();
+        let note: Note = facet_git_tree::deserialize(&tree, &self.repo.objects)?;
+        Ok(note.binding.oid())
+    }
+
     /// The full refname of the note with identity `id`, scanning every ref
-    /// under [`ANCHOR_PREFIX`] for a matching leaf segment. `None` when no
+    /// under this store's prefix for a matching leaf segment. `None` when no
     /// such note exists.
     fn find_ref(&self, id: ObjectId) -> Result<Option<String>> {
         let leaf = id.to_string();
-        for refname in self.refs_under(&format!("{ANCHOR_PREFIX}/"))? {
+        for refname in self.refs_under(&format!("{}/", self.prefix))? {
             if refname.rsplit('/').next() == Some(leaf.as_str()) {
                 return Ok(Some(refname));
             }
@@ -386,16 +602,19 @@ impl<'r> Store<'r> {
     }
 }
 
-/// `refs/anchors/<target>/<id>`.
-fn anchor_ref(target: ObjectId, id: ObjectId) -> String {
-    format!("{ANCHOR_PREFIX}/{target}/{id}")
-}
-
 /// A flat, filesystem-safe lock filename for a ref: `%` and `/` are
 /// percent-escaped so the whole ref becomes one path segment, never a nested
 /// directory tree.
 fn encode_ref(refname: &str) -> String {
     refname.replace('%', "%25").replace('/', "%2F")
+}
+
+/// The trailing path segment of a refname, parsed back as an [`ObjectId`] —
+/// every note ref's identity, binding-keyed or genesis-keyed alike.
+fn leaf_id(refname: &str) -> Result<ObjectId> {
+    let leaf = refname.rsplit('/').next().unwrap_or_default();
+    ObjectId::from_hex(leaf.as_bytes())
+        .map_err(|error| Error::Object(format!("ref {refname:?} has a non-oid leaf: {error}")))
 }
 
 /// Whether a failed commit should be retried by re-reading the tip: either a

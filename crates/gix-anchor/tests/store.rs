@@ -261,6 +261,108 @@ fn attachment_round_trips_and_stays_reachable() {
     assert!(found, "the attachment tree must be reachable from the note");
 }
 
+/// `create` mints a fresh genesis identity every call, even for the same
+/// binding — two notes about one binding never collide onto one ref, unlike
+/// `attach`. `update` then versions one of them forward by id, leaving the
+/// other untouched, and carries the binding forward unchanged.
+#[test]
+fn create_mints_distinct_ids_and_update_versions_one_forward_by_id() {
+    let dir = fixture_repo(&numbered(1..=5));
+    let repo = gix::open(dir.path()).unwrap();
+    let store = Store::open(&repo);
+
+    let commit = head_commit(&repo);
+    let binding = Binding::Commit { commit };
+
+    let first = store
+        .create(&binding, b"first note", None, None, None, "first")
+        .unwrap();
+    let second = store
+        .create(&binding, b"second note", None, None, None, "second")
+        .unwrap();
+    assert_ne!(first, second, "same binding, distinct genesis identities");
+
+    let first_note = store.get(first).unwrap().expect("first exists");
+    assert_eq!(first_note.body, b"first note");
+    assert_eq!(first_note.binding, binding);
+    assert_eq!(first_note.parent, None);
+    assert_eq!(first_note.state, None);
+
+    let updated = store
+        .update(
+            first,
+            b"first note, edited",
+            None,
+            Some("some-parent".to_owned()),
+            Some("resolved".to_owned()),
+            "edit",
+        )
+        .unwrap();
+    assert_eq!(updated, first, "update preserves the genesis identity");
+
+    let latest = store.get(first).unwrap().expect("first still exists");
+    assert_eq!(latest.body, b"first note, edited");
+    assert_eq!(latest.binding, binding, "binding carried forward unchanged");
+    assert_eq!(latest.parent, Some("some-parent".to_owned()));
+    assert_eq!(latest.state, Some("resolved".to_owned()));
+
+    let history = store.history(first).unwrap();
+    assert_eq!(history.len(), 2, "create + update recorded on one ref");
+
+    // The second note is untouched by updating the first.
+    let second_note = store.get(second).unwrap().expect("second exists");
+    assert_eq!(second_note.body, b"second note");
+    assert_eq!(second_note.state, None);
+}
+
+/// `update` on an id nothing was ever `create`d under fails with
+/// `Error::Resolve` rather than silently creating a note.
+#[test]
+fn update_of_a_missing_id_errors() {
+    let dir = fixture_repo(&numbered(1..=3));
+    let repo = gix::open(dir.path()).unwrap();
+    let store = Store::open(&repo);
+
+    let bogus = gix::ObjectId::null(gix::hash::Kind::Sha1);
+    let result = store.update(bogus, b"x", None, None, None, "edit");
+    assert!(matches!(result, Err(gix_anchor::Error::Resolve(_))));
+}
+
+/// `Store::with_prefix` roots the same engine at a different ref namespace:
+/// notes written through one prefix are invisible to a store opened at
+/// another, and vice versa.
+#[test]
+fn with_prefix_roots_a_separate_namespace() {
+    let dir = fixture_repo(&numbered(1..=5));
+    let repo = gix::open(dir.path()).unwrap();
+    let anchors = Store::open(&repo);
+    let comments = Store::with_prefix(&repo, "refs/comments");
+
+    let commit = head_commit(&repo);
+    let binding = Binding::Commit { commit };
+
+    let anchor_id = anchors.attach(&binding, b"an anchor note", None).unwrap();
+    let comment_id = comments
+        .create(&binding, b"a comment", None, None, None, "comment")
+        .unwrap();
+
+    assert!(anchors.get(comment_id).unwrap().is_none());
+    assert!(comments.get(anchor_id).unwrap().is_none());
+    assert_eq!(
+        anchors.get(anchor_id).unwrap().unwrap().body,
+        b"an anchor note"
+    );
+    assert_eq!(
+        comments.get(comment_id).unwrap().unwrap().body,
+        b"a comment"
+    );
+
+    let reference = repo
+        .find_reference(&format!("refs/comments/{}/{comment_id}", binding.target()))
+        .expect("comment ref exists under the custom prefix");
+    drop(reference);
+}
+
 /// `anchor.retention`: the anchored blob stays reachable by walking the
 /// note's own committed tree — the store's ref keeps it alive through
 /// force-push, branch deletion, and gc with no special-casing.

@@ -17,6 +17,13 @@ pub enum Error {
     /// does not exist, for instance.
     #[error("could not resolve {0:?}")]
     Resolve(String),
+    /// A stored [`StoredNote::parent`](gix_anchor::StoredNote::parent) was
+    /// not valid hex, while hydrating a [`crate::Comment`]'s
+    /// [`parent`](crate::Comment::parent) — should never happen, since this
+    /// crate is the only writer of that field and always writes a comment
+    /// id's own hex rendering.
+    #[error("stored parent id {0:?} is not a valid object id")]
+    InvalidParent(String),
 }
 
 /// The `Result` alias every `gix-comment` operation returns.

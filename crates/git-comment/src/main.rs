@@ -9,14 +9,19 @@
 //! to a bare revision (`Binding::Commit`) or, with `--path`, to a specific
 //! blob path and optional line range (`Binding::Position`, a
 //! [`gix_comment::Anchor`]) — either way, optionally carrying a raw-tree
-//! attachment (`--attach`) alongside the message. `list` and `show` read comments
-//! back — `show <id>@<rev>` projects a position-bound comment onto another
-//! commit, re-deriving where its anchor now sits, the way git addresses a
-//! revision; `show <id>~N` reads an older version of the comment itself.
-//! `edit` and `append` reattach a new or extended message; `log` prints a
-//! comment's version history. `remove` deletes one or more comments. Bare
-//! `git comment` lists, like `git remote`.
+//! attachment (`--attach`) alongside the message. `reply` starts a new
+//! comment that joins an existing one's thread instead of standing alone;
+//! `resolve`/`reopen` flip a comment's lifecycle state without touching its
+//! message. `list` and `show` read comments back — `show <id>@<rev>`
+//! projects a position-bound comment onto another commit, re-deriving where
+//! its anchor now sits, the way git addresses a revision; `show <id>~N`
+//! reads an older version of the comment itself; `show <id> --thread` prints
+//! the comment's whole thread, root first. `edit` and `append` reattach a
+//! new or extended message; `log` prints a comment's version history.
+//! `remove` deletes one or more comments. Bare `git comment` lists, like
+//! `git remote`.
 
+use std::collections::HashMap;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 
@@ -24,8 +29,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use gix::ObjectId;
 use gix_comment::{
-    Anchor, Binding, Comment, Comments, LineRange, Projection, capture, capture_worktree, project,
-    project_worktree, snippet,
+    Anchor, Binding, Comment, Comments, LineRange, Projection, State, Thread, capture,
+    capture_worktree, project, project_worktree, snippet,
 };
 
 #[derive(Parser)]
@@ -40,19 +45,34 @@ enum Command {
     /// Attach a comment to a revision (defaults to `HEAD`), or, with
     /// `--path`, to a specific blob path and optional line range within it.
     Add(AddArgs),
+    /// Reply to an existing comment, joining its thread instead of starting
+    /// a new one. The reply inherits the parent's binding automatically.
+    Reply(ReplyArgs),
     /// Replace a comment's message. With no `-m`/`-F` and nothing piped,
     /// opens `$EDITOR` seeded with the current message.
     Edit(EditArgs),
     /// Append to a comment's message, separated by a blank line — the new
     /// content is gathered the same way `add`'s message is.
     Append(AppendArgs),
-    /// List comments, or only those attached to `<object>`.
+    /// Mark a comment resolved, message and attachment unchanged.
+    Resolve {
+        /// A comment id (an unambiguous hex prefix is fine).
+        id: String,
+    },
+    /// Mark a resolved comment open again.
+    Reopen {
+        /// A comment id (an unambiguous hex prefix is fine).
+        id: String,
+    },
+    /// List comment threads, or only those attached to `<object>`. Lists
+    /// open thread roots by default; `--resolved`/`--all` widen that.
     #[command(visible_alias = "ls")]
     List(ListArgs),
-    /// Show a comment's target, binding, author, and message. Append
+    /// Show a comment's target, binding, author, message, and state. Append
     /// `@<rev>` to a position-bound comment's id to project it onto another
     /// commit instead, re-deriving where its anchor now sits; append `~N`
-    /// or `^` to see an older version of the comment itself.
+    /// or `^` to see an older version of the comment itself; `--thread`
+    /// shows the whole thread instead of just this comment.
     Show(ShowArgs),
     /// Show a comment's version history, newest first.
     Log {
@@ -116,6 +136,27 @@ struct AddArgs {
     attach: Option<String>,
 }
 
+/// Arguments for `reply`.
+#[derive(clap::Args)]
+struct ReplyArgs {
+    /// The comment being replied to — an unambiguous hex prefix is fine.
+    id: String,
+    /// The reply's message, taken verbatim.
+    #[arg(
+        short = 'm',
+        long = "message",
+        value_name = "MSG",
+        conflicts_with = "file"
+    )]
+    message: Option<String>,
+    /// Read the reply's message from a file.
+    #[arg(short = 'F', long = "file", value_name = "FILE")]
+    file: Option<PathBuf>,
+    /// Attach an arbitrary tree-ish's tree alongside the reply.
+    #[arg(long = "attach", value_name = "TREE-ISH")]
+    attach: Option<String>,
+}
+
 /// Arguments for `edit`.
 #[derive(clap::Args)]
 struct EditArgs {
@@ -166,6 +207,15 @@ struct ListArgs {
     /// Emit one JSON object per line instead of the human-readable columns.
     #[arg(long)]
     json: bool,
+    /// Include resolved thread roots alongside open ones (open roots only by
+    /// default). Conflicts with `--all`, which drops the roots-only filter
+    /// entirely.
+    #[arg(long, conflicts_with = "all")]
+    resolved: bool,
+    /// List every comment — thread roots and replies alike, any state —
+    /// instead of just open roots.
+    #[arg(long)]
+    all: bool,
 }
 
 /// Arguments for `show`.
@@ -180,8 +230,14 @@ struct ShowArgs {
     json: bool,
     /// Project onto the working tree instead of showing the captured
     /// location. Conflicts with an `@<rev>` or `~N`/`^` suffix on `spec`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "thread")]
     worktree: bool,
+    /// Show the comment's whole thread — root first, then every reply in
+    /// time order — instead of just this comment. Conflicts with an
+    /// `@<rev>` or `~N`/`^` suffix on `spec`, checked at runtime since the
+    /// suffix lives inside `spec` rather than being its own flag.
+    #[arg(long)]
+    thread: bool,
 }
 
 fn main() -> Result<()> {
@@ -204,13 +260,32 @@ fn main() -> Result<()> {
 
     match cli.command {
         // Bare `git comment` lists, like `git remote` — a read-only default.
-        None => cmd_list(&repo, &comments, None, false)?,
+        None => cmd_list(&repo, &comments, None, false, false, false)?,
         Some(Command::Add(args)) => cmd_add(&repo, &comments, args)?,
+        Some(Command::Reply(args)) => cmd_reply(&repo, &comments, args)?,
         Some(Command::Edit(args)) => cmd_edit(&repo, &comments, args)?,
         Some(Command::Append(args)) => cmd_append(&comments, args)?,
-        Some(Command::List(args)) => cmd_list(&repo, &comments, args.object, args.json)?,
+        Some(Command::Resolve { id }) => cmd_resolve(&comments, &id)?,
+        Some(Command::Reopen { id }) => cmd_reopen(&comments, &id)?,
+        Some(Command::List(args)) => {
+            cmd_list(
+                &repo,
+                &comments,
+                args.object,
+                args.json,
+                args.resolved,
+                args.all,
+            )?;
+        }
         Some(Command::Show(args)) => {
-            cmd_show(&repo, &comments, &args.spec, args.json, args.worktree)?;
+            cmd_show(
+                &repo,
+                &comments,
+                &args.spec,
+                args.json,
+                args.worktree,
+                args.thread,
+            )?;
         }
         Some(Command::Log { id }) => cmd_log(&comments, &id)?,
         Some(Command::Remove { ids }) => cmd_remove(&comments, &ids)?,
@@ -296,6 +371,42 @@ fn cmd_add(repo: &gix::Repository, comments: &Comments<'_>, args: AddArgs) -> Re
     Ok(())
 }
 
+/// `reply`: join an existing comment's thread with a new comment that
+/// inherits its binding automatically.
+fn cmd_reply(repo: &gix::Repository, comments: &Comments<'_>, args: ReplyArgs) -> Result<()> {
+    let ReplyArgs {
+        id,
+        message,
+        file,
+        attach,
+    } = args;
+    let parent = resolve_comment(comments, &id)?;
+    let attachment = attach
+        .as_deref()
+        .map(|s| resolve_tree(repo, s))
+        .transpose()?;
+    let body = body_source(message.as_deref(), file.as_ref(), "")?;
+    let new_id = comments.reply(parent.id, &String::from_utf8_lossy(&body), attachment)?;
+    println!("{new_id}");
+    Ok(())
+}
+
+/// `resolve`: mark a comment resolved, message and attachment unchanged.
+fn cmd_resolve(comments: &Comments<'_>, id: &str) -> Result<()> {
+    let comment = resolve_comment(comments, id)?;
+    let new_id = comments.resolve(comment.id)?;
+    println!("{new_id}");
+    Ok(())
+}
+
+/// `reopen`: mark a resolved comment open again.
+fn cmd_reopen(comments: &Comments<'_>, id: &str) -> Result<()> {
+    let comment = resolve_comment(comments, id)?;
+    let new_id = comments.reopen(comment.id)?;
+    println!("{new_id}");
+    Ok(())
+}
+
 /// `edit`: reattach a comment's binding with a replacement message, seeding
 /// the editor (when reached) with the comment's current message. `--attach`
 /// replaces the attachment; omitted, the existing attachment (if any) is
@@ -337,14 +448,19 @@ fn cmd_append(comments: &Comments<'_>, args: AppendArgs) -> Result<()> {
     Ok(())
 }
 
-/// `list`: every comment, or only those attached to `<object>` — including a
+/// `list`: thread roots, or only those attached to `<object>` — including a
 /// position comment whose anchor's own commit is `<object>`, even though its
-/// `target` (the anchored blob) is not.
+/// `target` (the anchored blob) is not. Open roots only by default;
+/// `resolved` widens that to every root regardless of state; `all` drops the
+/// roots-only filter entirely, listing every comment (roots and replies
+/// alike, any state) — the flat view `list` gave before threads existed.
 fn cmd_list(
     repo: &gix::Repository,
     comments: &Comments<'_>,
     object: Option<String>,
     json: bool,
+    resolved: bool,
+    all: bool,
 ) -> Result<()> {
     let target = match object {
         Some(object) => Some(
@@ -355,10 +471,20 @@ fn cmd_list(
         None => None,
     };
 
-    let all = comments.list(None)?;
-    let all: Vec<Comment> = match target {
-        None => all,
-        Some(target) => all
+    // Reply counts are computed off every comment regardless of `all`/
+    // `resolved`/`target`, so a root's count always reflects its whole
+    // thread, not just what this particular listing happens to show.
+    let every_comment = comments.list(None)?;
+    let reply_counts = reply_counts(&every_comment);
+
+    let rows: Vec<Comment> = if all {
+        every_comment
+    } else {
+        comments.list_roots(None, resolved)?
+    };
+    let rows: Vec<Comment> = match target {
+        None => rows,
+        Some(target) => rows
             .into_iter()
             .filter(|comment| {
                 comment.target == target || position_commit(&comment.binding) == Some(target)
@@ -366,35 +492,81 @@ fn cmd_list(
             .collect(),
     };
 
-    for comment in all {
+    for comment in rows {
         let kind = binding_kind(&comment.binding);
+        let replies = reply_counts.get(&comment.id).copied().unwrap_or(0);
         if json {
-            print_list_json(&comment, kind)?;
+            print_list_json(&comment, kind, replies)?;
         } else {
             println!(
-                "{}  {}  {}",
+                "{}  {}  {}  {}{}",
                 short(comment.id),
                 comment.author.name,
-                first_line(&comment.message)
+                state_str(comment.state),
+                first_line(&comment.message),
+                reply_suffix(replies),
             );
         }
     }
     Ok(())
 }
 
-/// `show`: a comment's target, binding, author, message, and — for a
+/// How many direct replies each comment (by id) has, counted across every
+/// comment `list(None)` returns — [`cmd_list`]'s per-root reply count.
+fn reply_counts(comments: &[Comment]) -> HashMap<ObjectId, usize> {
+    let mut counts = HashMap::new();
+    for comment in comments {
+        if let Some(parent) = comment.parent {
+            *counts.entry(parent).or_insert(0usize) += 1;
+        }
+    }
+    counts
+}
+
+/// `" (N replies)"` for `count > 0`, else empty — [`cmd_list`]'s
+/// human-readable reply-count suffix.
+fn reply_suffix(count: usize) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        format!("  ({count} repl{})", if count == 1 { "y" } else { "ies" })
+    }
+}
+
+/// A [`State`]'s porcelain label.
+fn state_str(state: State) -> &'static str {
+    match state {
+        State::Open => "open",
+        State::Resolved => "resolved",
+    }
+}
+
+/// `show`: a comment's target, binding, author, message, state, and — for a
 /// position — its anchored snippet. An `@<rev>` suffix projects the
 /// comment's anchor onto `<rev>`; a `~N`/`^` suffix reads an older version of
-/// the comment itself; `--worktree` projects onto the working tree.
+/// the comment itself; `--worktree` projects onto the working tree;
+/// `--thread` shows the comment's whole thread instead of just this comment
+/// (and conflicts with either suffix, checked here since the suffix lives
+/// inside `spec` rather than being its own flag clap can declare a conflict
+/// against).
 fn cmd_show(
     repo: &gix::Repository,
     comments: &Comments<'_>,
     spec: &str,
     json: bool,
     worktree: bool,
+    thread: bool,
 ) -> Result<()> {
     let (id, selector) = split_show_spec(spec)?;
     let comment = resolve_comment(comments, id)?;
+
+    if thread {
+        if !matches!(selector, ShowSelector::Tip) {
+            bail!("--thread conflicts with an @<rev> or ~N/^ suffix on the comment id");
+        }
+        return show_thread(comments, &comment, json);
+    }
+
     match selector {
         ShowSelector::Projection(rev) => {
             if worktree {
@@ -414,7 +586,7 @@ fn cmd_show(
                     history.len()
                 )
             })?;
-            let versioned = comments.get_at(commit)?;
+            let versioned = comments.get_at(comment.id, commit)?;
             show_comment(&versioned, json)
         }
         ShowSelector::Tip if worktree => show_worktree(repo, &comment, json),
@@ -427,7 +599,7 @@ fn cmd_show(
 fn cmd_log(comments: &Comments<'_>, id: &str) -> Result<()> {
     let comment = resolve_comment(comments, id)?;
     for commit_id in comments.history(comment.id)? {
-        let version = comments.get_at(commit_id)?;
+        let version = comments.get_at(comment.id, commit_id)?;
         let when = version
             .author
             .time
@@ -465,6 +637,10 @@ fn show_comment(comment: &Comment, json: bool) -> Result<()> {
             .time
             .format(gix::date::time::format::ISO8601)?
     );
+    println!("state: {}", state_str(comment.state));
+    if let Some(parent) = comment.parent {
+        println!("parent: {parent}");
+    }
     if let Some(attachment) = comment.attachment {
         println!("attachment: {attachment}");
     }
@@ -473,6 +649,50 @@ fn show_comment(comment: &Comment, json: bool) -> Result<()> {
     if let Some(text) = anchor_snippet {
         println!("snippet:");
         println!("{text}");
+    }
+    Ok(())
+}
+
+/// `show --thread`: the comment's whole thread, root first, then every reply
+/// in time order.
+fn show_thread(comments: &Comments<'_>, comment: &Comment, json: bool) -> Result<()> {
+    let thread = comments.thread(comment.id)?;
+    if json {
+        print_thread_json(&thread)?;
+        return Ok(());
+    }
+    print_thread_entry(&thread.root)?;
+    for reply in &thread.replies {
+        println!();
+        print_thread_entry(reply)?;
+    }
+    Ok(())
+}
+
+/// One thread entry's human-readable form: author, date, state, and message
+/// — [`show_thread`]'s per-comment block.
+fn print_thread_entry(comment: &Comment) -> Result<()> {
+    println!("id: {}", comment.id);
+    println!("author: {} <{}>", comment.author.name, comment.author.email);
+    println!(
+        "date: {}",
+        comment
+            .author
+            .time
+            .format(gix::date::time::format::ISO8601)?
+    );
+    println!("state: {}", state_str(comment.state));
+    println!("message:");
+    println!("{}", comment.message);
+    Ok(())
+}
+
+/// `show --thread --json`: one JSON object per line (root first, then every
+/// reply), the same per-comment shape [`print_comment_json`] emits.
+fn print_thread_json(thread: &Thread) -> Result<()> {
+    print_comment_json(&thread.root, binding_kind(&thread.root.binding), None)?;
+    for reply in &thread.replies {
+        print_comment_json(reply, binding_kind(&reply.binding), None)?;
     }
     Ok(())
 }
@@ -798,8 +1018,12 @@ fn print_comment_json(comment: &Comment, kind: &str, snippet: Option<&str>) -> R
         format!("\"author\":{}", json_string(&comment.author.name)),
         format!("\"email\":{}", json_string(&comment.author.email)),
         format!("\"time\":{}", json_string(&time)),
+        format!("\"state\":\"{}\"", state_str(comment.state)),
         format!("\"message\":{}", json_string(&comment.message)),
     ];
+    if let Some(parent) = comment.parent {
+        fields.push(format!("\"parent\":\"{parent}\""));
+    }
     if let Some(attachment) = comment.attachment {
         fields.push(format!("\"attachment\":\"{attachment}\""));
     }
@@ -811,21 +1035,28 @@ fn print_comment_json(comment: &Comment, kind: &str, snippet: Option<&str>) -> R
 }
 
 /// Emit a `list` entry as a small JSON object: `id`, `target`, `binding`,
-/// `author`, `email`, `time`, and `summary` (the message's first line).
-fn print_list_json(comment: &Comment, kind: &str) -> Result<()> {
+/// `author`, `email`, `time`, `state`, `replies` (this root's direct reply
+/// count), `parent` (when this entry is itself a reply, e.g. under
+/// `--all`), and `summary` (the message's first line).
+fn print_list_json(comment: &Comment, kind: &str, replies: usize) -> Result<()> {
     let time = comment
         .author
         .time
         .format(gix::date::time::format::ISO8601)?;
-    let fields = [
+    let mut fields = vec![
         format!("\"id\":\"{}\"", comment.id),
         format!("\"target\":\"{}\"", comment.target),
         format!("\"binding\":\"{kind}\""),
         format!("\"author\":{}", json_string(&comment.author.name)),
         format!("\"email\":{}", json_string(&comment.author.email)),
         format!("\"time\":{}", json_string(&time)),
+        format!("\"state\":\"{}\"", state_str(comment.state)),
+        format!("\"replies\":{replies}"),
         format!("\"summary\":{}", json_string(first_line(&comment.message))),
     ];
+    if let Some(parent) = comment.parent {
+        fields.push(format!("\"parent\":\"{parent}\""));
+    }
     println!("{{{}}}", fields.join(","));
     Ok(())
 }

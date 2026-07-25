@@ -52,7 +52,7 @@
 mod comment;
 mod error;
 
-pub use comment::{Author, Comment, Comments};
+pub use comment::{Author, Comment, Comments, State, Thread};
 pub use error::{Error, Result};
 
 // The `gix-anchor` vocabulary a caller needs to describe and project what a
