@@ -1,0 +1,38 @@
+id = "git-comment"
+name = "Git Comment"
+description = "Editor-facing view over git-comment's refs/comments/* -- code lenses, hover threads, and hint diagnostics for anchored comments, backed by gix-comment-lsp."
+version = "0.1.0"
+schema_version = 1
+authors = ["git-anchor contributors"]
+repository = "https://github.com/git-ents/git-anchor"
+
+[language_servers.git-comment]
+name = "git-comment"
+languages = [
+    "Rust",
+    "Python",
+    "JavaScript",
+    "TypeScript",
+    "TSX",
+    "Go",
+    "C",
+    "C++",
+    "Java",
+    "Ruby",
+    "PHP",
+    "Swift",
+    "Kotlin",
+    "C#",
+    "Elixir",
+    "Haskell",
+    "Lua",
+    "Shell Script",
+    "Markdown",
+    "JSON",
+    "YAML",
+    "TOML",
+    "HTML",
+    "CSS",
+    "Scala",
+    "Zig",
+]

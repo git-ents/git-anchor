@@ -1,4 +1,5 @@
 /target/
+editors/zed/target/
 /.claude/
 /.rumdl_cache/
 *.html

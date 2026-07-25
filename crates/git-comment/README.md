@@ -107,6 +107,7 @@ git comment show <id>@<rev> [--json]        # project a position-bound comment o
 git comment show <id>~N | <id>^ [--json]    # an older version of the comment itself (~0/bare id is the tip)
 git comment log <id>                        # a comment's version history: <oid> <iso-date> <author> <summary>, newest first
 git comment remove <id>...    (alias: rm)   # delete one or more comments, resolved atomically before any removal
+git comment lsp                             # editor-facing LSP server on stdio (see below); not for interactive use
 ```
 
 `<id>` is a comment's identity object id; any unambiguous hex prefix resolves, the same way git resolves short revisions.
@@ -125,3 +126,8 @@ Unlike a plain anchor note, a comment's `<id>` is never derived from its binding
 What makes it a *comment* rather than a bare note is that the author and timestamp are never separate fields — they are read back from the storage commit's own author signature, since a note is a git commit and git already records who wrote it and when.
 An optional `--attach`ed tree rides along in the same commit, so it stays reachable — no gitlinks, no copies.
 `show <id>@<rev>` re-derives where the anchored span sits on another commit, reporting *current*, *relocated*, *outdated*, or *deleted*; `show <id> --worktree` re-derives the same against the on-disk working tree instead of a commit.
+
+## Editor integration
+
+`git comment lsp` runs [`gix-comment-lsp`](../gix-comment-lsp) on stdio: a read-time Language Server Protocol view over `refs/comments/*` that projects comments onto whatever buffer an editor has open (code lenses, hover threads, hint diagnostics) and writes new ones back through the same library calls this CLI uses — a comment is one entity everywhere.
+See [`editors/zed`](../../editors/zed) for a Zed extension that wires it up.

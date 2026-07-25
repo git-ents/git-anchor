@@ -87,6 +87,11 @@ enum Command {
         /// ambiguous or missing id leaves all comments untouched.
         ids: Vec<String>,
     },
+    /// Run an editor-facing Language Server Protocol view over
+    /// `refs/comments/*` on stdio (code lenses, hover threads, hint
+    /// diagnostics, and a compose-on-save flow for new comments). For
+    /// editor integration, not interactive use.
+    Lsp,
 }
 
 /// Arguments for `add`.
@@ -256,6 +261,13 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let repo = gix::discover(".").context("not inside a git repository")?;
+
+    // Handled before `Comments::open` borrows `repo`: `serve` needs to own
+    // the repository, and no other command does.
+    if matches!(cli.command.as_ref(), Some(Command::Lsp)) {
+        return gix_comment_lsp::serve(repo).map_err(Into::into);
+    }
+
     let comments = Comments::open(&repo);
 
     match cli.command {
@@ -289,6 +301,7 @@ fn main() -> Result<()> {
         }
         Some(Command::Log { id }) => cmd_log(&comments, &id)?,
         Some(Command::Remove { ids }) => cmd_remove(&comments, &ids)?,
+        Some(Command::Lsp) => unreachable!("handled above before `comments` borrowed `repo`"),
     }
     Ok(())
 }
