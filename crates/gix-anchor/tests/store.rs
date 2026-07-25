@@ -192,6 +192,75 @@ fn remove_deletes_the_note_and_reports_whether_it_existed() {
     assert!(!store.remove(id).unwrap());
 }
 
+/// An attachment tree round-trips: `attach_with_attachment` records it,
+/// `get` reports its oid, and it is reachable by walking the note's own
+/// committed tree — the same `anchor.retention` guarantee the binding's own
+/// blobs get. The plain `attach` leaves the attachment `None`, and the note's
+/// `commit` field is a real commit whose author/time the store records.
+#[test]
+fn attachment_round_trips_and_stays_reachable() {
+    let dir = fixture_repo(&numbered(1..=5));
+    let repo = gix::open(dir.path()).unwrap();
+    let store = Store::open(&repo);
+
+    let commit = head_commit(&repo);
+    let binding = Binding::Commit { commit };
+
+    // Use HEAD's own tree as an arbitrary "raw tree" attachment.
+    let attach_tree = repo
+        .find_commit(commit)
+        .unwrap()
+        .tree_id()
+        .unwrap()
+        .detach();
+    let id = store
+        .attach_with_attachment(&binding, b"see the attached tree", Some(attach_tree), None)
+        .unwrap();
+    let note = store.get(id).unwrap().expect("note exists");
+    assert_eq!(note.attachment, Some(attach_tree));
+    assert!(
+        repo.find_commit(note.commit).is_ok(),
+        "commit field is real"
+    );
+
+    // The plain attach path leaves the attachment absent.
+    let plain = store
+        .attach(
+            &Binding::Position(gix_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap()),
+            b"no attachment",
+            None,
+        )
+        .unwrap();
+    assert_eq!(store.get(plain).unwrap().unwrap().attachment, None);
+
+    // The attachment tree is reachable from the note's own committed tree.
+    let refname = format!("refs/anchors/{}/{}", binding.target(), id);
+    let tree = repo
+        .find_reference(&refname)
+        .unwrap()
+        .into_fully_peeled_id()
+        .unwrap()
+        .object()
+        .unwrap()
+        .peel_to_tree()
+        .unwrap();
+    let mut stack = vec![tree.id().detach()];
+    let mut found = false;
+    while let Some(id) = stack.pop() {
+        if id == attach_tree {
+            found = true;
+            break;
+        }
+        for entry in repo.find_tree(id).unwrap().iter() {
+            let entry = entry.unwrap();
+            if entry.mode().is_tree() {
+                stack.push(entry.object_id());
+            }
+        }
+    }
+    assert!(found, "the attachment tree must be reachable from the note");
+}
+
 /// `anchor.retention`: the anchored blob stays reachable by walking the
 /// note's own committed tree — the store's ref keeps it alive through
 /// force-push, branch deletion, and gc with no special-casing.

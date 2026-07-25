@@ -33,14 +33,23 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 /// writers should land on the first attempt.
 const MAX_CAS_ATTEMPTS: u32 = 8;
 
-/// The document committed at a note's ref: an arbitrary attached `body` plus
-/// the [`Binding`] it is attached to, embedded by tree id
-/// (`anchor.retention`) so the anchor's own content and context blobs stay
-/// reachable through the note's own tree.
+/// The document committed at a note's ref: an arbitrary attached `body`, the
+/// [`Binding`] it is attached to, and an optional `attachment` tree — all
+/// embedded by tree id (`anchor.retention`) so the anchor's own content and
+/// context blobs, and any attached tree, stay reachable through the note's
+/// own tree.
+///
+/// `attachment` is opaque to this crate: it is an arbitrary tree the caller
+/// hands to [`Store::attach_with_attachment`], embedded verbatim as a
+/// [`RawTree`] passthrough so it survives gc through the note's ref the same
+/// way the binding's own blobs do. A downstream consumer (a `Comment`, say)
+/// uses it to hang extra content off a note without this crate needing to
+/// know that content's shape.
 #[derive(Facet)]
 struct Note {
     body: Vec<u8>,
     binding: RawTree,
+    attachment: Option<RawTree>,
 }
 
 /// A content-addressed store of notes over a `gix` repository, git-notes
@@ -62,6 +71,15 @@ pub struct StoredNote {
     pub body: Vec<u8>,
     /// The latest version's commit summary (first line of the message).
     pub message: String,
+    /// The optional attachment tree embedded alongside the note, as handed
+    /// to [`Store::attach_with_attachment`] — `None` for a note attached with
+    /// the plain [`Store::attach`].
+    pub attachment: Option<ObjectId>,
+    /// The commit this note was read from — a note ref's tip for
+    /// [`Store::get`] / [`Store::list`], or the requested commit for
+    /// [`Store::get_at`]. Its author and time are the note's author and
+    /// timestamp, since a note *is* a git commit.
+    pub commit: ObjectId,
 }
 
 impl<'r> Store<'r> {
@@ -94,6 +112,35 @@ impl<'r> Store<'r> {
         body: &[u8],
         message: Option<&str>,
     ) -> Result<ObjectId> {
+        self.attach_with_attachment(binding, body, None, message)
+    }
+
+    /// [`Store::attach`], plus an `attachment` tree embedded verbatim in the
+    /// note document as a [`RawTree`] passthrough (`anchor.retention`): the
+    /// tree stays reachable through the note's own ref regardless of what
+    /// else references it, the same way the binding's own blobs do.
+    ///
+    /// `attachment` must already exist in the repository's object database
+    /// (a [`RawTree`] carries no content of its own to write) — callers
+    /// resolve it however they like, e.g. `rev_parse` of a tree-ish. It is
+    /// opaque here: this crate never decodes it. A downstream consumer such
+    /// as a `Comment` uses it to hang extra content off a note.
+    ///
+    /// Returns the note's identity oid, exactly as [`Store::attach`] does —
+    /// the attachment is part of the note's *body document*, not its
+    /// identity, so re-attaching the same binding with a different attachment
+    /// still commits forward onto the same ref.
+    ///
+    /// # Errors
+    ///
+    /// The same failures as [`Store::attach`].
+    pub fn attach_with_attachment(
+        &self,
+        binding: &Binding,
+        body: &[u8],
+        attachment: Option<ObjectId>,
+        message: Option<&str>,
+    ) -> Result<ObjectId> {
         let target = binding.target();
         let id = binding.serialize_into(&self.repo.objects)?;
         check_hex_component("target", &target.to_string())?;
@@ -102,6 +149,7 @@ impl<'r> Store<'r> {
         let note = Note {
             body: body.to_vec(),
             binding: RawTree::new(id),
+            attachment: attachment.map(RawTree::new),
         };
         let tree = facet_git_tree::serialize_into(&note, &self.repo.objects)?;
 
@@ -223,13 +271,13 @@ impl<'r> Store<'r> {
     /// [`Store::read_note`] (a ref's tip) and [`Store::get_at`] (any commit
     /// off a note's history).
     fn note_at_commit(&self, commit: ObjectId) -> Result<StoredNote> {
-        let commit = self.repo.find_commit(commit).map_err(Error::git)?;
-        let tree = commit.tree_id().map_err(Error::git)?.detach();
+        let commit_obj = self.repo.find_commit(commit).map_err(Error::git)?;
+        let tree = commit_obj.tree_id().map_err(Error::git)?.detach();
         let note: Note = facet_git_tree::deserialize(&tree, &self.repo.objects)?;
         let id = note.binding.oid();
         let binding = Binding::deserialize(&id, &self.repo.objects)?;
         let target = binding.target();
-        let message = gix_object::commit::MessageRef::from_bytes(commit.message_raw_sloppy())
+        let message = gix_object::commit::MessageRef::from_bytes(commit_obj.message_raw_sloppy())
             .summary()
             .to_string();
         Ok(StoredNote {
@@ -238,6 +286,8 @@ impl<'r> Store<'r> {
             binding,
             body: note.body,
             message,
+            attachment: note.attachment.map(|attachment| attachment.oid()),
+            commit,
         })
     }
 
