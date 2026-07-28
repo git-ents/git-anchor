@@ -1,0 +1,53 @@
+**What**
+
+This project spec-coverage discipline is one of its strongest features: `lib.rs` doc comments enumerate which normative requirement each item implements, and `DEVPLAN.md` Phase 5 makes keeping them accurate an explicit deliverable. That discipline is now broken in exactly the place it matters most.
+
+Requirement IDs cited in code:
+
+```
+anchor.definition      anchor.fuzzy-fallback   anchor.immutable
+anchor.lines           anchor.path             anchor.projection
+anchor.retention       anchor.tree-pair-diff   anchor.working-tree
+lens.compose           lens.diagnostics        lens.hover
+lens.lenses            lens.parity             lens.serve
+lens.working-tree      model.comment-state
+```
+
+Requirement IDs defined in `docs/specification.adoc`:
+
+```
+anchor.definition   anchor.immutable    anchor.retention
+anchor.projection   anchor.fuzzy-fallback
+anchor.working-tree anchor.tree-pair-diff
+```
+
+Eight cited IDs have no definition: all seven `lens.*` and `model.comment-state`. Two more, `anchor.lines` and `anchor.path`, are cited and undefined as well. `grep -c "lens\." docs/specification.adoc` returns 0.
+
+**Where**
+
+- `docs/specification.adoc` — 122 lines, `anchor.*` only.
+- `crates/gix-comment-lsp/src/*.rs` — cites `lens.serve`, `lens.lenses`, `lens.compose`, `lens.diagnostics`, `lens.hover`, `lens.parity`, `lens.working-tree`, `model.comment-state` in module and function docs throughout, phrased as binding ("`lens.diagnostics` is binding: conversation carries no judgment", `render.rs:158-159`).
+- `crates/gix-comment/` — no requirement IDs at all; the comment record shape, the reply model, and the open/resolved lifecycle are entirely unspecified.
+
+**Why it matters**
+
+This is a doc gap that is really a design gap, which is why it is worth filing rather than waving at.
+
+The `anchor.*` requirements are good: they are the reason the projection taxonomy is crisp and the reason retention has a defensible rationale. Everything built since — the comment layer, the LSP, the whole editor story — has been built without that discipline, and it shows in the findings from this review. The authorship rewrite on resolve, the reply-ordering timestamp, the compose flow that can silently drop input, the lens inability to follow a rename: each of those is a question a requirement would have forced you to answer up front. `model.comment-state` is *cited* at `lens.rs:104` as if it settled what a comment lifecycle is; it settles nothing, because it does not exist.
+
+The citations also make the code assert a rigour it does not have. A reader following `lens.compose` expects a normative statement about how composing works and finds nothing, which undermines confidence in the `anchor.*` citations that *are* backed.
+
+For the conference: the spec is a differentiator. "Here are the invariants, here is the code annotated with which one it upholds" is a strong slide. It is a weak slide if half the annotations are dangling, and an attendee who opens the spec will notice in about thirty seconds.
+
+**Options**
+
+- Option A — Write the missing requirements. A `comment.*` section (record shape, identity, authorship, thread model and its ordering guarantee, lifecycle and its concurrency semantics) and a `lens.*` section (what the lens surfaces, what it promises about renames and dirty buffers, what the compose contract is). Trade-off: real work, and it will force decisions on several of the other issues in this review — which is the point.
+- Option B — Demote the dangling citations to plain prose so the code stops referencing IDs that do not exist. Trade-off: honest and cheap, but it gives up the property that makes the discipline valuable.
+- Option C — Add a CI check that every requirement ID cited in a doc comment resolves to an `id="..."` in `docs/specification.adoc`. Trade-off: none worth mentioning; it is a grep. It would have caught this.
+- Option D — Move the LSP requirements into their own spec document (`docs/lens.adoc`) since they concern a different subsystem with a different stability posture. Trade-off: two documents to keep aligned.
+
+**Recommendation**
+
+Option C first, today, because it is trivial and it makes the problem non-recurring. Then Option A for `comment.*` at minimum — the comment record shape and the resolve semantics are where the real unanswered design questions live, and writing them down is the cheapest way to surface the decisions this review is asking you to make.
+
+`lens.*` can reasonably wait or become Option D; the LSP is the newest and least settled surface and it is defensible to say so explicitly rather than pretending it is specified. What is not defensible is the current state, where the code claims a specification that is not there. High confidence.
