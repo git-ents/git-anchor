@@ -1,0 +1,63 @@
+**What**
+
+`git anchor show <spec>` parses a single token three ways (`crates/git-anchor/src/main.rs:567-606`): split on the first of `@`, `~`, `^`; `@` means "project onto this revision", `~N` and `^` mean "read this many versions back in the note own history".
+
+It is compact and it reads well in the README. It also has four problems.
+
+**1. `^` and `~` mean the opposite of what git trained the user to expect, and mean two different things inside one token.**
+
+```
+$ git anchor show <id>^          # the note previous version
+$ git anchor show <id>@HEAD^     # projected onto the parent commit
+```
+
+The same character is note-version in the first and commit-ancestry in the second, decided by whether an `@` appeared earlier. In git own grammar `^` and `~` are always commit ancestry. A user who reads `<id>~1` as "the commit before" will get a different answer than they expect and no error.
+
+**2. The two selectors cannot combine.**
+
+```
+$ git anchor show <id>~1@main
+Error: invalid version offset "~1@main"
+```
+
+"Where did the previous version of this note point on main" is not expressible. The grammar is a flat choice, not two orthogonal axes, even though version and projection target genuinely are orthogonal.
+
+**3. An empty id prefix matches everything and silently succeeds.**
+
+```
+$ git anchor show @HEAD
+current
+TARGET1
+```
+
+`resolve_note` (`main.rs:535-546`) prefix-matches, and `""` is a prefix of every id. With one note in the store it resolves; with several it errors as ambiguous. So `git anchor show $ID@HEAD` with an unset or misspelled variable shows a *different, arbitrary note* rather than failing. That is a scripting hazard with a silent wrong answer.
+
+**4. No long form, so it is not composable or discoverable.**
+
+There is no `--at <rev>` and no `--version <n>`. `--worktree` exists as a flag (`main.rs:150-153`) and explicitly conflicts with the `@<rev>` suffix — so the same concept, "what am I projecting onto", is split across a flag and a string suffix that cannot be used together. A script must concatenate strings to project, and a revision containing `@` cannot be expressed at all (`v1@rc` is misparsed; `@{u}` is explicitly rejected at `main.rs:575-581`).
+
+Discoverability: the syntax appears only in a prose paragraph of `--help` and in `Show a note...` in the subcommand list. `git anchor show --help` lists `--json` and `--worktree` as options and nothing about `@`.
+
+**Where**
+
+- `crates/git-anchor/src/main.rs:560-606` — `split_show_spec`.
+- `crates/git-anchor/src/main.rs:535-546` — `resolve_note`, the empty-prefix hole.
+- `crates/git-anchor/src/main.rs:140-154`, `:337-371` — `ShowArgs` and dispatch.
+- `crates/git-comment/src/main.rs` — the same grammar, plus `--thread`, which also conflicts with the suffix.
+
+**Why it matters**
+
+`git anchor show dd1ebeb2@main` is genuinely a good line and it should stay — it is the kind of detail that makes a tool feel like it belongs in git. But right now it is the *only* way to do the thing, it is undiscoverable from `--help`, it cannot be combined with the other selector, and it has a failure mode that returns the wrong note instead of an error.
+
+**Options**
+
+- Option A — Keep the suffix as sugar, add long forms: `--at <rev>` and `--version <n>`, mutually compatible, with `--worktree` becoming `--at worktree` or staying as a synonym. The suffix desugars to them. Trade-off: more flags, but the flags are what `--help` can advertise and what scripts should use.
+- Option B — Reject an empty id in `resolve_note`, and require a minimum prefix length (git uses 4 for abbreviated oids). Trade-off: none; this is straightforwardly a hole.
+- Option C — Change the version selector away from `~`/`^` to something that does not collide with git ancestry semantics — `<id>#N`, or drop it in favour of `--version`. Trade-off: `~N` is familiar shorthand and reads nicely; the collision is only confusing when both selectors are in play.
+- Option D — Support the combination by parsing both selectors rather than the first: `<id>~1@main` splits into version 1 and rev `main`. Trade-off: makes the grammar genuinely two-dimensional, which is more to explain, but it matches how the underlying operations actually compose.
+
+**Recommendation**
+
+B immediately — an empty prefix resolving to an arbitrary note is a real hazard and the fix is one condition. Then A, which makes the feature discoverable and scriptable while keeping the nice short form for humans and for the README.
+
+D is worth doing if A does not already cover it (with long forms, `--version 1 --at main` composes for free, and the suffix can stay one-dimensional). C is the one I would skip: the `~N` overload is mildly confusing but the shorthand is worth it, and once `--version` exists the ambiguity has an unambiguous escape hatch. Moderate confidence overall; high on B.
