@@ -1,0 +1,44 @@
+**What**
+
+`refs/anchors/*` and `refs/comments/*` are outside the default fetch refspec, so nothing brings them across. There is no `git anchor push`/`fetch`, no `install` subcommand that configures a refspec, and the strings `refspec`, `remote.origin.fetch`, and `refs/anchors` do not appear in `README.md`, `DEVPLAN.md`, `docs/specification.adoc`, or any crate README.
+
+**Measured**:
+
+```
+$ git clone /tmp/gconc /tmp/gclone
+$ cd /tmp/gclone && git anchor list
+                                  # nothing
+$ git config --add remote.origin.fetch "+refs/anchors/*:refs/anchors/*"
+$ git fetch origin && git anchor list
+3af4dc68  b8cb000a  Bob: actually it is fine
+```
+
+The incantation works. Nothing in the project tells anyone it exists.
+
+**Where**
+
+- `crates/git-anchor/src/main.rs:34-66` and `crates/git-comment/src/main.rs:44-94` — full command trees; neither has a distribution verb. `git-comment` has `lsp`, so a non-CRUD subcommand is already precedented.
+- `README.md` — the demo is entirely single-clone.
+
+**Why it matters**
+
+"Attach review comments to code, stored in Git" invites exactly one first question: how does my colleague see them. Today the answer is an undocumented config line, and the follow-on questions have no answers at all in the repo:
+
+- What happens on a force-push or a rebase of the anchored history? The anchor ref keeps the old commit reachable only if you adopt witness parents (which today you do not — see the retention issue), so after a rebase the anchor commit is orphaned, exact projection degrades to the fuzzy path, and the comment quietly relocates by guess.
+- Two people anchor the same span concurrently and both push. With binding-keyed identity those are literally the same ref (see the silent-overwrite issue) and one is rejected non-fast-forward. With genesis-keyed comments they are different refs and both land, which is correct — but nobody has written that down.
+- Two people resolve the same comment in different clones. Divergent tips on one ref, no merge story.
+
+The sibling `git-forge` has an `install` subcommand, so there is a house pattern for "configure the repository to use this tool" that this repo has not adopted.
+
+**Options**
+
+- Option A — `git anchor install` / `git comment install`: add the fetch refspec to the named remote, and optionally a `push` alias. One command, matches the sibling project, and makes the demo a two-clone demo. Trade-off: mutates user config, so it must be explicit and reversible.
+- Option B — `git anchor push [<remote>]` / `git anchor fetch [<remote>]` wrappers, the way `git notes` users end up scripting it. Trade-off: two more verbs to maintain, and it hides the fact that these are ordinary refs, which is the thing you want people to notice.
+- Option C — Documentation only: a "Sharing anchors" section in the README with the refspec, the push spec, and an honest paragraph on rebase and divergence. Trade-off: zero code, and the reader has to do it by hand.
+- Option D — Define a merge strategy for divergent note refs and expose it, so `git anchor fetch` can actually reconcile. For genesis-keyed comments this is nearly trivial (distinct ids never collide); for binding-keyed anchors it needs a real body merge.
+
+**Recommendation**
+
+Option C before anything else — the README demo should end with a second clone seeing the comment, because that is the moment the idea becomes real to an audience, and it costs nothing. Then Option A, because it makes the demo one command instead of a config incantation.
+
+Be honest about rebase in the docs rather than working around it: "an anchor survives a rebase of its history only approximately" is a defensible position and a much better answer than being asked and improvising. If you adopt witness parents from the retention issue, that answer improves to "exactly", which is a strong pairing of the two changes.
