@@ -1,0 +1,1 @@
+The stored record is an untagged tree whose type is recovered by sniffing entry names, with no format version and no shared envelope with the sibling git-store

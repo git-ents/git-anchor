@@ -1,0 +1,45 @@
+**What**
+
+`Binding::serialize_into` writes each variant as a bare tree with no discriminant, and `Binding::deserialize` recovers the variant by inspecting which entry names are present (`binding.rs:368-416`):
+
+```
+blob + content        -> Position
+base_tree             -> Delta
+witness + tree        -> Tree
+exactly {commit,tree} -> Hybrid
+exactly {commit}      -> Commit
+```
+
+The module doc states the reason plainly (`binding.rs:18-24`): a `facet` enum derive would tag externally, "which would not round-trip the existing anchor storage format byte for byte". So an unversioned legacy layout is dictating the encoding of a five-variant sum type.
+
+**Where**
+
+- `crates/gix-anchor/src/binding.rs:18-24` — the stated rationale.
+- `crates/gix-anchor/src/binding.rs:368-416` — the sniffing rules.
+- `crates/gix-anchor/src/error.rs` — `UnknownBindingShape`, the only guard.
+- `crates/gix-anchor/src/store.rs:79-96` — `Note`, also untagged and unversioned.
+- `DEVPLAN.md` open decision 2 recommended depending on `gix-store` for ref persistence; `crates/gix-anchor/src/store.rs` is a local reimplementation instead. Only `facet-git-tree` is shared (`crates/gix-anchor/Cargo.toml`).
+
+**Why it matters**
+
+The sniffing rules are not disjoint by construction, only by accident of current field names. Two concrete hazards:
+
+- Adding a `witness` field to `Anchor` — which is exactly what the retention issue recommends — would make a `Position` tree also satisfy the `witness + tree` test. It happens to be checked after the `blob + content` test today, so ordering saves it. That is a very thin margin for a persistent format.
+- Adding any field to `Commit` or `Hybrid` breaks their `names.len() == N` exact-cardinality tests, so old readers reject new data with `UnknownBindingShape` and new readers cannot tell old data from corruption.
+
+There is no version byte anywhere in the format. `Note` has the same property. So the answer to "how do you evolve this schema" is currently "you do not", and the answer to "what does an old client do with a new record" is "it errors, indistinguishably from encountering garbage".
+
+The cross-project angle matters because you are presenting four projects together. `git-store` exists, `facet-git-tree` is already the shared codec, and DEVPLAN explicitly recommended sharing the ref layer too — then the repo went the other way. An audience seeing `git-store`, `git-anchor`, `git-query`, and `git-forge` in one talk will reasonably ask why the store project store is not the store. Having a crisp answer, or having reused it, is worth more than the reimplementation saved.
+
+**Options**
+
+- Option A — Add an explicit `kind` entry to every binding tree and a `version` entry to `Note`. Read both schemes for one release (sniff when `kind` is absent), then require the tag. Trade-off: one migration window, and the trees grow by one small blob each. This is the cheapest correct thing.
+- Option B — Adopt a shared envelope from `git-store`, so all four projects encode "a typed, versioned record in a tree" the same way and one story covers the family. Trade-off: a dependency and a coordinated change across repos; more work, much better talk.
+- Option C — Keep sniffing but make it total and defensive: require the entry-name sets to be provably disjoint (assert it in a test over all variants) and reject on ambiguity rather than first-match. Trade-off: hardens the current design without making it evolvable. A stopgap, not an answer.
+- Option D — Do nothing and document the format as unstable. Trade-off: honest, and defensible for a 0.1.0 — but the format is already on disk in whatever repos the author has been dogfooding.
+
+**Recommendation**
+
+Option A now, Option B as the family-wide direction. A is small, mechanical, and removes the class of failure entirely; there is no good argument for a persistent format with no discriminant and no version, and "byte-for-byte compatibility with a pre-1.0 layout" is not a strong enough reason to keep one. High confidence.
+
+Option B is a genuine judgement call — reimplementing 680 lines of ref store to avoid a cross-repo dependency is a legitimate choice — but if the four projects are being presented as a family, the encoding should look like a family.
