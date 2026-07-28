@@ -1,0 +1,44 @@
+**What**
+
+The README and `gix-anchor/src/lib.rs:5-12` claim a clean split: `gix-anchor` owns a general primitive, `gix-comment` is "merely the first client", and reviews, TODO trackers, and blame overlays could reuse the same mechanism. Tested against the code, the dependency runs both ways at the schema level.
+
+The `Note` record in `gix-anchor` (`store.rs:79-96`) has three fields that exist for `gix-comment` and nothing else:
+
+- `parent: Option<String>` — "conventionally an upstream note hex id", i.e. a reply link.
+- `state: Option<String>` — "a free-form lifecycle tag", i.e. open/resolved.
+- `created_at: u64` — nanoseconds, whose doc justifies itself entirely by reference to "a caller such as `gix-comment` ordering notes that landed in the same second".
+
+The module doc is candid about it (`store.rs:26-32`): these are "opaque" fields that "a downstream consumer such as `gix-comment` uses ... to build reply threads and a resolvable lifecycle on top of this one storage engine". `store.rs` names `gix-comment` seven times.
+
+Opaque is not the same as absent. The primitive record has a slot shaped exactly like a reply pointer and a slot shaped exactly like a lifecycle state, and no second consumer would put anything else in either.
+
+**Where**
+
+- `crates/gix-anchor/src/store.rs:79-96` — `Note`.
+- `crates/gix-anchor/src/store.rs:26-32`, `:72-78`, `:86-95` — the rationale, naming the consumer.
+- `crates/gix-anchor/src/store.rs:141-161` — the same fields on the public `StoredNote`.
+- `crates/gix-anchor/src/store.rs:117`, `:177` — `prefix: &"static str`, so only a consumer with a compile-time-known namespace can open a store; a runtime-configured one cannot.
+- `crates/gix-anchor/src/lib.rs:5-12` — the claim being tested.
+
+In the other direction the split holds up better: `gix-comment` genuinely is thin (`Comments` is a view over `Store` with a two-value `State` enum and a thread walk). The leak is downward, not upward.
+
+**Why it matters**
+
+Two concrete costs.
+
+First, format evolution. Every one of these fields is in the persisted tree. A different consumer that wants, say, a priority or an assignee cannot add one without changing `gix-anchor` — so the "arbitrary content attached to Git objects" promise stops at the body blob. The `attachment: Option<RawTree>` slot is the right idea and generalises properly; `parent` and `state` are the same idea done narrowly, three times.
+
+Second, it weakens the talk. "A general primitive with a comment layer on top" is a much better story than "a note store with two comment-shaped fields it declines to look at", and someone who reads `store.rs` will notice. The retention issue found the mirror image of this: a general mechanism (`witnesses`) that exists and is unused. Here it is a specific mechanism that exists and should have been general.
+
+**Options**
+
+- Option A — Collapse `parent` and `state` into the existing `attachment`/metadata idea: one opaque `metadata: Option<RawTree>` (or a small string map) the consumer owns entirely. `gix-comment` puts its parent id and lifecycle tag in there; a TODO tracker puts a due date. Trade-off: one indirection on every read, and `Store::list` can no longer filter on state without decoding — though it cannot today either.
+- Option B — Keep the fields but rename and document them as the general concepts they are (`predecessor`, `label`), and drop the references to `gix-comment` from `gix-anchor` docs. Trade-off: cosmetic; the schema is still consumer-shaped, only less obviously.
+- Option C — Move threading and lifecycle up into `gix-comment` entirely, storing them inside the comment body document rather than in the note record. `gix-anchor` keeps only `body`, `binding`, `attachment`. Trade-off: `gix-comment` needs its own document schema and a codec, which is real work — but it is work that makes `gix-comment` a genuine example of how to build on the primitive, which is what you want to show.
+- Option D — Accept it and change the claim. Say `gix-anchor` is a note store for annotation workflows, not a fully general one. Trade-off: honest, costs nothing, and gives up a nice framing.
+
+**Recommendation**
+
+Option C is the right architecture and it is also the best demonstration: if `gix-comment` can define its own record shape on top of a primitive that knows nothing about comments, the primitive claim is proven rather than asserted, and the next consumer has a worked example to copy. Moderate confidence — this is a genuine judgement call, and Option A is a reasonable cheaper approximation.
+
+What I would not do is leave it as-is while making the claim in the README. If C is too much before the conference, take Option D for now: a precise description of what the primitive actually is costs nothing and is more convincing than an overreaching one. Also widen `with_prefix` to accept a non-static prefix regardless of which option you pick; a `&"static str` namespace is a needless restriction on exactly the third-party consumers the split is meant to enable.
