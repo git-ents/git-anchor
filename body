@@ -1,0 +1,33 @@
+**What**
+
+The store has no index. `Store::find_ref` (`store.rs:561-569`) resolves a note id by iterating every ref under the prefix and string-matching the leaf. `Store::list` (`store.rs:393-406`) reads and fully deserializes every note. Because an `Anchor` embeds the whole anchored file in its `content` field, "fully deserialize" means reading the entire source file of every anchor in the repository into memory.
+
+Every consumer sits on top of that:
+
+- `resolve_note` in the CLI (`crates/git-anchor/src/main.rs:535-546`) calls `store.list(None)` and then filters by hex prefix. So `git anchor show <id>` reads the entire store.
+- `Store::get`, `update`, `remove`, and `history` all route through `find_ref`.
+- `Comments::thread` (`gix-comment/src/comment.rs:277-313`) calls `get(id)` (one full ref scan) and then `list(Some(target))` (another).
+- The LSP `document_comments` (`gix-comment-lsp/src/lens.rs:112-143`) calls `list_roots(None, false)` — every comment in the repository — then filters by path, then calls `comments.thread(id)` per surviving comment.
+
+**Measured**, 400 anchors on 20 files:
+
+```
+git anchor list        1.95s
+git anchor show <id>   1.95s   # same cost for one note as for all of them
+git anchor show <id>@HEAD  1.95s
+```
+
+**Why it matters**
+
+The LSP is the amplifier and the demo surface. `server.rs:236-247` publishes diagnostics on every `didChange`, and `didChange` fires per keystroke. Each publish is O(all comments) full note decodes plus O(matching comments x all refs) for the thread lookups. At the 400-note scale I measured, that is roughly two seconds of blocking git work per character typed, on a synchronous single-threaded server (`server.rs:9-13`). The editor will visibly wedge. If the demo repo has more than a few dozen comments, the live experience will not match the README.
+
+**Options**
+
+- Option A — Cheap and immediate: make `find_ref` compute the refname directly instead of scanning. It cannot today because the ref is `<prefix>/<target>/<id>` and the caller has only `<id>` — but `StoredNote` already carries `target`, so most call sites could pass it, and `references().prefixed()` could be given the two-level prefix. Also give `resolve_note` a cheap path for a full-length id. Trade-off: still O(refs) for a genuine prefix lookup, but drops the full-note decode.
+- Option B — Do not decode `content` unless asked. Split `StoredNote` into a header (id, target, binding kind, message, state, parent) read from the commit and the small tree entries, and a lazily-loaded body/anchor. `list` becomes O(refs) cheap reads instead of O(total source bytes). This is the single highest-value change and does not alter the storage format at all.
+- Option C — Maintain a derived index (a ref holding a tree keyed by path, or a plain cache file under `.git/`) mapping path to note ids, refreshed when the ref tips change. Trade-off: a cache to invalidate; the tips themselves are a sound cache key, so this is tractable.
+- Option D — In the LSP specifically: debounce diagnostics on `didChange`, and scope the initial query by path rather than listing everything.
+
+**Recommendation**
+
+Option B first — it is a pure refactor, it does not touch the on-disk format, and it removes the dominant term. Then Option A, then Option D before the talk. Option C is the real answer at scale but should wait until the ref layout question is settled, since an index keyed by the wrong grouping key is wasted work. High confidence: the profile here is not subtle, and the per-keystroke path is the one that will bite on stage.

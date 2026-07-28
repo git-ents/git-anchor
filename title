@@ -1,0 +1,1 @@
+Every read path is a linear scan of all refs plus a full decode of every note, so a single lookup costs the whole store; the LSP pays it on every keystroke
