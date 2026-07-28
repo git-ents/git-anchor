@@ -1,0 +1,46 @@
+**What**
+
+`git anchor add` calls `Store::attach` (`crates/git-anchor/src/main.rs:255`), which is binding-keyed: the note id is the binding serialized tree oid (`store.rs:236`), so the same `(path, lines, blob, commit)` always resolves to the same ref, and a second `add` commits a new version forward over the first (`store.rs:260`).
+
+**Measured**:
+
+```
+$ git anchor add --path f.txt -L 2,3 -m "Ada: this bound is wrong"
+3af4dc68bc2adbd70208e29387ec07a6f09f03fc
+$ git anchor add --path f.txt -L 2,3 -m "Bob: actually it is fine"
+3af4dc68bc2adbd70208e29387ec07a6f09f03fc          # same id
+
+$ git anchor list
+3af4dc68  b8cb000a  Bob: actually it is fine       # Ada note is gone
+$ git for-each-ref refs/anchors/**
+refs/anchors/b8cb.../3af4dc68...                   # one ref
+```
+
+Ada note is recoverable only via `git anchor show <id>~1`, and nothing in the output of either `add` or `list` indicates that anything was displaced.
+
+**Where**
+
+- `crates/git-anchor/src/main.rs:255` — `add` uses `attach`.
+- `crates/gix-anchor/src/store.rs:181-262` — `attach`, binding-keyed by design.
+- `crates/gix-anchor/src/store.rs:264-338` — `create`, genesis-keyed, which does not have this problem.
+- `crates/gix-comment/src/comment.rs:11-17` — `gix-comment` explicitly chose genesis keying because "two people can comment on the same line, so binding identity alone cannot tell those apart".
+
+**Why it matters**
+
+The store engine offers both identity schemes and `gix-comment` — the crate that actually models a review workflow — routes around binding keying for exactly this reason. But the anchor porcelain, which is the primitive being presented, ships the scheme its own first consumer rejected. That is a signal worth taking seriously: if the consumer had to opt out, the default is probably wrong.
+
+The verb makes it worse. `add` in every git porcelain the user knows (`git notes add`, `git remote add`, `git tag`) either creates or refuses; it does not silently replace. `git notes add` in particular *errors* on an existing note and requires `-f`. This one replaces without a word.
+
+Concretely for a talk: "two reviewers comment on the same function" is a scenario someone will suggest from the audience, and it currently loses data.
+
+**Options**
+
+- Option A — Make `add` refuse when the binding already has a note, with a message pointing at `edit`, `append`, and a `--force` escape. Trade-off: one more failure mode, but it is the `git notes add` contract users already expect.
+- Option B — Switch `git anchor add` to genesis keying (`Store::create`), matching `git comment add`. Two anchors on one span become two notes. Trade-off: you lose the deterministic "the same binding always resolves to the same ref" property, which is genuinely valuable for idempotent tooling — a bot re-running should update, not accumulate.
+- Option C — Keep both and expose the choice: `add` is genesis-keyed, and a separate `attach` (or `add --idempotent`) is binding-keyed for tooling that wants upsert semantics. Trade-off: two verbs to explain, but they are two genuinely different operations and the library already models them as such.
+
+**Recommendation**
+
+Option C, with `add` defaulting to genesis-keyed. The binding-keyed upsert is a real and useful primitive — it is exactly what an automated annotator wants — but it should not be what a human typing `add` gets. Option A is the minimum acceptable fix and is a small change if you want something before the talk.
+
+Whichever you pick, `add` should print something when it displaces an existing note. Silently returning the same id as the note you just overwrote is the worst of both worlds. High confidence.

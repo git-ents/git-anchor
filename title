@@ -1,0 +1,1 @@
+git anchor add on a span that already has a note silently replaces it: binding-keyed identity makes add an upsert
