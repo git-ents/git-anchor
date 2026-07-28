@@ -1,0 +1,42 @@
+**What**
+
+`map_range` returns `None` — which becomes `Projection::Outdated` — for *any* diff hunk that overlaps the anchored range at all (`projection.rs:656-668`, the `else { return None }` arm). The four-outcome taxonomy is clean but it is not complete, and `Outdated` absorbs everything the mapper cannot express.
+
+**Where**
+
+- `crates/gix-anchor/src/projection.rs:638-674` — `map_range`, the whole decision.
+- `crates/gix-anchor/src/projection.rs:368` — rename options; `Rewrites::default()` means renames at 50 percent similarity and **copy detection off**.
+- `crates/gix-anchor/src/projection.rs:391-405` — the rename arm filters on `copy: false`.
+- `crates/gix-anchor/src/projection.rs:653` — `Algorithm::Histogram` on a raw `InternedInput`, no whitespace normalization available.
+
+**Measured**, anchoring lines 3-5 of a 7-line file and then making one change each:
+
+```
+reindent the anchored lines only (a git diff -w no-op)  -> outdated
+insert one line in the middle of the span               -> outdated
+move the three anchored lines verbatim into g.txt       -> outdated (at f.txt)
+duplicate the whole file to h.txt                       -> current
+```
+
+The third is the worst: the anchored text exists byte-for-byte at `g.txt:1-3`, and the system reports `outdated` pointing at the file the code left.
+
+**Why it matters**
+
+The pitch is "your comment follows the code as it moves". A reformat is the most common whole-repository change there is, and one `cargo fmt` or one prettier run marks every review comment in the repository outdated simultaneously, with no way to distinguish "the code was reformatted" from "someone rewrote your logic". A reviewer cannot triage that. Neither can a bot.
+
+Split spans and moved-to-another-file are the two cases a code review tool most needs to handle, because they are what refactoring *is*, and both currently land in the same bucket as deletion-by-rewrite.
+
+There is a related asymmetry worth naming: `Projection::axes` (`projection.rs:89-96`) already decomposes the outcome into a position axis and a content axis, and its own doc says a flat `Projection` cannot distinguish these cases. But the decomposition is derived from the flat outcome after the fact, so it can only recover information `map_range` already threw away. `Content::Edited` is inferred from the label, not measured.
+
+**Options**
+
+- Option A — Normalize before diffing. Give `map_range` an option set that can ignore leading/trailing whitespace, and honour it by default for the whitespace case. Trade-off: a whitespace-only change genuinely does change the bytes a reviewer commented on; you are choosing a policy. Make it explicit rather than implicit.
+- Option B — Add outcomes. `Split { path, ranges: Vec<LineRange> }` when every original line survives but is no longer contiguous, and `Moved { path, lines }` when the anchored text appears intact at a different path (`project_candidates` at `projection.rs:281-334` already does whole-blob candidate search; the same idea at span granularity is a substring search over the target tree). Trade-off: a wider taxonomy for consumers to switch on, and moved-span search is O(tree) not O(diff).
+- Option C — Replace the binary map with a similarity score. Report `Relocated` with a confidence rather than `Outdated`, and let the consumer threshold. Trade-off: pushes the hard judgement onto every consumer, and every consumer will pick a different number.
+- Option D — Keep the taxonomy but make `Outdated` carry evidence: the mapped best-effort range, the hunk that touched it, and whether the change was whitespace-only. `Outdated` stops being a dead end without adding variants.
+
+**Recommendation**
+
+Option D plus the whitespace half of Option A, with Option B as the follow-on. D is the smallest change that stops `Outdated` being a black hole, and it is what the CLI and the LSP both need (see the porcelain and lens issues — both currently render `outdated` with nothing actionable attached). Do not do Option C alone: a confidence number with no named cause is not more useful than a label. Medium-high confidence; the exact set of new outcomes in Option B is a genuine judgement call, but the fact that `Outdated` is doing four unrelated jobs is not.
+
+Separately and cheaply: enable copy detection in the rewrite options, since a copied block is a case the current code explicitly filters out (`copy: false`) rather than handles.
