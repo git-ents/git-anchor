@@ -1,0 +1,36 @@
+**What**
+
+`Thread` replies are sorted by `created_at` then by id (`gix-comment/src/comment.rs:302-310`). `created_at` is `SystemTime::now()` in nanoseconds since the epoch, taken on the writer machine (`store.rs:98-106`), stored in the note tree, and forwarded unchanged across edits.
+
+The field doc explains why it exists: git commit author time has one-second resolution, so two replies in the same second could not be ordered, and "an id-based tiebreak cannot order correctly since a note id is a content hash, uncorrelated with when it was written" (`store.rs:86-95`).
+
+That diagnosis is right about the symptom and wrong about the problem.
+
+**Where**
+
+- `crates/gix-anchor/src/store.rs:86-95`, `:98-106` — the field and its clock.
+- `crates/gix-comment/src/comment.rs:302-310` — the sort.
+- `crates/gix-comment/src/comment.rs:99-102`, `:477-492` — `Comment::parent` and `root_of`, the causal structure that already exists.
+
+**Why it matters**
+
+Nanosecond precision on a wall clock is meaningless across machines. The comparison that matters is between replies written by *different people on different laptops*, where the error term is clock skew — routinely seconds, sometimes minutes, occasionally years on a misconfigured container. Going from one-second to one-nanosecond resolution improves ordering within a single machine, which is the case that barely matters, and does nothing for the case that does. Worse, it makes the ordering look authoritative when it is not: a reader sees a strict total order and has no way to know it is derived from unsynchronised clocks.
+
+The causal information is already stored. Every reply carries `parent` (`comment.rs:102`), and `root_of` (`comment.rs:477-492`) already walks the chain. A reply that names its parent *happened after* that parent, verifiably, with no clock involved. The current code walks that structure to group a thread and then throws it away to sort by timestamp, flattening a tree into a list ordered by the least reliable field available.
+
+Note also that this field only exists because of the mutable-tip design (see the authorship issue): if a comment ref history were an append-only event log, the creation event commit would carry the creation time and no shadow field would be needed at all. `created_at` is a second timestamp with different semantics from the one displayed as `date:`, and only one of them is right for each purpose.
+
+**Options**
+
+- Option A — Topological order over `parent`, with a deterministic tiebreak among siblings. Siblings are genuinely concurrent — no ordering between them exists in the data — so pick a stable arbitrary one (id) and be honest that it is arbitrary. Trade-off: the flat `Thread.replies: Vec<Comment>` cannot express a tree; either nest it or emit a depth alongside each reply. That is a better rendering anyway — the LSP hover currently flattens a threaded conversation into a list.
+- Option B — Hybrid logical clock: a Lamport counter (max of all observed parent counters, plus one) stored alongside the wall clock, tiebroken by wall clock and then id. Trade-off: an extra field, but it gives a total order that never contradicts causality and degrades to wall-clock order for genuinely concurrent writes. This is the standard answer for distributed threads.
+- Option C — Keep the wall clock but drop to a sane resolution and say what it is. Trade-off: does not fix anything, only stops overclaiming.
+- Option D — Order by the commit author time of the *genesis* commit (which is the creation time, unlike the tip) and keep the id tiebreak, deleting `created_at` entirely. Trade-off: back to one-second resolution, which is fine given that skew dominates anyway; removes a stored field.
+
+**Recommendation**
+
+Option A is the correct model — a thread is a causal structure and should be ordered as one, and you already store everything needed. Option B on top if you want a total order for display; that is the standard answer and it is worth stating on stage, because "we use a hybrid logical clock because wall clocks across contributors are not comparable" is a much better answer than "we added nanoseconds".
+
+Option D is the pragmatic cleanup if you take Option A: once causality carries the ordering, the wall clock is only a sibling tiebreak and does not need its own field.
+
+Naming the right answer as asked: causal, via parent pointers, with a Lamport or hybrid-logical counter for a total order and wall clock only as a display value. Not wall-clock-plus-finer-tiebreak. High confidence on the model; moderate on whether it is worth changing before the conference, since the current behaviour is fine in a single-author demo and the fix is most valuable in the multi-author case you are not demoing.

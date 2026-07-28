@@ -1,0 +1,1 @@
+Reply ordering uses a nanosecond wall clock, which is false precision across machines; causal order is already in the data and unused
