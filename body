@@ -1,0 +1,50 @@
+**What**
+
+The porcelain exposes storage operations rather than review workflow. Every question a user has after `add` is unanswerable from the CLI.
+
+**Where and what is missing**
+
+- `crates/git-anchor/src/main.rs:129-138` — `ListArgs` has exactly one filter (a revision) and one flag (`--json`). There is no `--path`, no `--state`, no `--at <rev>`, no `--outdated`. You cannot ask "what anchors are in the file I am looking at", which is the single most common question, nor "what went stale on main".
+- `crates/git-anchor/src/main.rs:293-330` — even the revision filter reads every note and filters in memory rather than scoping the ref prefix.
+- `--json` emits only `{id, target, binding, summary}`:
+
+  ```
+  {"id":"00b4618d...","target":"af926453...","binding":"position","summary":"anchor af926453..."}
+  ```
+
+  No path, no lines, no body, no state, no projection. So a script cannot filter on anything meaningful without calling `show` per id — and `show` is a full-store scan (see the indexing issue). The `summary` here is the auto-generated `anchor <target>` placeholder, which `show` deliberately suppresses as "storage plumbing" (`main.rs:404-411`) but `--json` surfaces.
+- `crates/git-anchor/src/main.rs:450-472` — `print_projection` prints the word `outdated` and nothing else. No path, no approximate location, no diff, nothing to act on. `Projection::Outdated` carries a `path` that is discarded here.
+- Exit codes: `git anchor show <id>@rev` exits 0 for `outdated` and for `deleted`. There is no way to write `git anchor ... || fail-the-build`.
+- Piping panics:
+
+  ```
+  $ git anchor list | head -2
+  00b4618d  af926453  note 16-10
+  00b784d2  0bb14f7b  note 7-16
+  thread main panicked at library/std/src/io/stdio.rs:1166:9:
+  failed printing to stdout: Broken pipe (os error 32)
+  ```
+
+  `println!` unwraps. SIGPIPE is not reset. The answer to "does it compose with `head` or `xargs`" is currently "no, it aborts with a Rust backtrace notice".
+- There is no re-anchor verb. When an anchor goes outdated the only recovery is to read the body, `remove`, and `add` again by hand — losing the note history. "I just rebased, now what" has no answer.
+
+**Why it matters**
+
+The value proposition of storing review state in Git rather than a web app is that it composes with everything else you already do in a terminal. Right now it composes with nothing: it cannot be filtered, its machine output is not usefully machine-readable, its exit codes carry no signal, and it crashes in a pipeline. On stage, someone will type `git anchor list | head` or `git anchor list | wc -l`, and the first of those prints a panic.
+
+`outdated` being a dead end is the workflow half of the same problem. The taxonomy says "an edit touched your span" and the tool then offers nothing: not where the span roughly is now, not what changed, not a way to move the note. For a review tool, going stale is the *normal* case, so it deserves the most tooling and currently has the least.
+
+**Options**
+
+- Option A — Add filters: `list --path <p>`, `--at <rev>` (project every anchor and print the outcome), `--state <outcome>`. With `--at`, `project_many` (`projection.rs:251-264`) already exists to make this one tree resolution for the whole batch.
+- Option B — Make `--json` emit the full record: path, lines, body, binding kind, state, and (with `--at`) the projection outcome and mapped range. Then `jq` does the filtering and Option A becomes optional sugar.
+- Option C — Exit codes: 0 for `current`/`relocated`, a distinct non-zero for `outdated` and `deleted`, so `show` is usable as a predicate. Document them.
+- Option D — Reset SIGPIPE to the default at startup, or write through a handle that treats `BrokenPipe` as a clean exit. Two lines.
+- Option E — `git anchor reanchor <id> [<rev>]`: re-capture the binding at a new revision, carrying the body and version history forward onto the same note. This is the "I rebased" verb and it is the one workflow command missing.
+- Option F — Make `outdated` output actionable: print the path, the best-effort mapped range, and optionally the hunk that touched it (pairs with the Outdated-catch-all issue).
+
+**Recommendation**
+
+D immediately — it is two lines and the current behaviour is embarrassing in a pipeline. Then B, because a complete JSON record makes A, C, and most scripting fall out for free and is far less API surface than a filter flag per question. Then E, which is the verb that turns this from a storage demo into a workflow.
+
+C is worth doing but pick the codes deliberately and write them down; ad-hoc exit codes are worse than none. High confidence on D and B; E is a design proposal and the exact semantics of carrying history across a re-anchor deserve thought.
