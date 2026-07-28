@@ -1,0 +1,36 @@
+**What**
+
+Two defects in the lens, both from the same root: the LSP projects only against the working tree, which has no commit on the target side and therefore no rename tracking, and it filters *before* projecting.
+
+1. `document_comments` (`gix-comment-lsp/src/lens.rs:112-143`) discards any comment whose `anchor.path` is not string-equal to the open document relative path (`lens.rs:126`), before `project_worktree` is ever called. `project_worktree` itself does no rename following either — its doc says so (`projection.rs:543-546`) and it looks up only `anchor.path` (`projection.rs:599`).
+
+   Consequence: rename `src/lib.rs` to `src/core.rs` and every comment on it disappears from the editor. It is not shown at the new path, because the path does not match. It is not shown at the old path, because the old path no longer exists.
+
+2. For `Projection::Outdated`, `landed_range` (`gix-comment-lsp/src/render.rs:41`) returns `line_range(anchor.lines)` — the *capture-time* line numbers. Once anything is inserted above the span, an outdated comment is pinned to a line it has nothing to do with, and stays there, labelled `(outdated)`.
+
+**Where**
+
+- `crates/gix-comment-lsp/src/lens.rs:112-143`, especially `:126`.
+- `crates/gix-comment-lsp/src/render.rs:37-44`.
+- `crates/gix-anchor/src/projection.rs:537-630` — `project_worktree` and its documented rename degradation.
+
+**Why it matters**
+
+"An anchor captured against one commit projects onto any later commit, so a comment pinned to a span of code follows that code as it moves" is the first sentence of the README. The CLI delivers it — `git anchor show <id>@main` correctly reported `relocated / path: src/core.rs` in my scratch repo after a rename. The editor, which is the surface you will actually demo, does not.
+
+That gap is the demo. If the plan is to rename or move a file on stage and show the comment travelling, it will work in the terminal and silently fail in Zed.
+
+The stale-line-number half is quieter but worse in daily use: a comment that drifts to an unrelated line is not just unhelpful, it is misleading, and there is no way for the user to tell that the position is fictional.
+
+**Options**
+
+- Option A — Project against `HEAD` first (`project_exact`, which does have rename tracking) to find the current path, then apply the working-tree delta on top. Two-stage: tree diff `anchor.commit -> HEAD` gives the destination path, then `map_range(anchor.content, buffer)` gives the live lines. Trade-off: two diffs per comment per request, which the indexing issue says you cannot currently afford — fix that first.
+- Option B — Cheap partial: build the path filter from the *projected* path rather than the recorded one. Compute the `anchor.path -> HEAD path` mapping once per request (one tree diff for the whole document, not per comment) and match against that.
+- Option C — Give `project_worktree` an optional `at_path` override so the caller can supply the path it already knows the document is at, letting the lens ask "does this anchor land in *this* buffer" rather than "does this anchor remember *this* path".
+- Option D — For the stale-range half specifically: have `Outdated` carry a best-effort mapped range (see the Outdated-catch-all issue) and render that, or fall back to rendering the comment as a file-level diagnostic at line 0 rather than at a fabricated line.
+
+**Recommendation**
+
+Option B plus Option D. B fixes the headline gap with one tree diff per document rather than per comment, which keeps the per-keystroke cost bounded. D stops the lens from asserting a position it does not have.
+
+If you only have time for one thing before the conference: fix the rename case. The claim in the first sentence of the README should be true on the surface you demo it on. High confidence on both.
