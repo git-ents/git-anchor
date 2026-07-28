@@ -1,0 +1,1 @@
+Retention pins the anchored bytes but not the anchored commit, so exact projection can vanish; the fuzzy fallback that replaces it is strictly worse than a diff against the bytes already embedded

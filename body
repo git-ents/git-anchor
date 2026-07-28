@@ -1,0 +1,47 @@
+This is the single most important design question in the repository, and I believe the current answer is wrong in a way that is cheap to fix.
+
+**What**
+
+An anchor embeds the full anchored blob (`content`) and a 7-line window around the range (`context`), both as tree entries under the note ref, so the *bytes* survive gc. It deliberately does not keep the anchored *commit* reachable — `anchor.immutable` says so explicitly. When that commit is collected, `project` silently degrades to `project_from_context`, a window-scoring scan over the retained context blob.
+
+Three separate facts make that trade unnecessary:
+
+1. `Binding::witnesses()` already exists precisely to fix this. The module doc at `crates/gix-anchor/src/binding.rs:11-16` says a witness exists "so a claim ledger commit can carry the witness as an extra parent and keep the bound objects reachable". No writer ever does this. `Store::create` (`store.rs:320-322`) writes a parentless commit and `commit_forward` (`store.rs:588`) passes only the previous tip. `witnesses()` has no non-test caller in the workspace. The mechanism designed to make the fallback unnecessary is implemented and unused.
+
+2. The fallback is strictly weaker than a path already implemented next to it. `project_exact` only needs the anchor commit for two things: rename detection and locating the destination path. The *line mapping* is `map_range(&anchor.content, &new, range)` (`projection.rs:433`) — a real histogram diff against the embedded content, no commit involved. `project_worktree` (`projection.rs:584-630`) does exactly that against arbitrary bytes. So when the commit is gone, the correct fallback is: look `anchor.path` up in the target tree, read that blob, run `map_range`. Exact, deterministic, same quality as `project_exact` minus renames — which `project_from_context` also lacks.
+
+3. The window scan silently returns wrong answers. Measured on a scratch repo with two byte-identical functions:
+
+```
+context            : "fn a() {\n    let x = 1;\n    let y = 2;\n    BUG_HERE();\n    let z = 3;\n    done();\n}\n"
+project_exact        -> Relocated { lines: 14..=14 }   # correct
+project_from_context -> Relocated { lines:  6..=6  }   # wrong function
+project_worktree     -> Relocated { lines: 14..=14 }   # correct, and needs no commit
+```
+
+Duplicated blocks are not exotic; they are what a codebase looks like. The scan takes the first maximal window (`projection.rs:502` updates only on strict `>`), accepts anything at 50 percent line equality (`projection.rs:509-513`), and then throws the score away — `let Some((start, _score))`. Nothing downstream can tell a 100 percent match from a 4-of-7 coincidence.
+
+**Where**
+
+- `crates/gix-anchor/src/binding.rs:11-16`, `:166-177` — the witness concept and its unused accessor.
+- `crates/gix-anchor/src/store.rs:320-322`, `:583-602` — the two commit writers, neither of which uses a witness parent.
+- `crates/gix-anchor/src/projection.rs:458-535` — `project_from_context`, the window scan.
+- `crates/gix-anchor/src/projection.rs:584-630`, `:638-674` — `project_worktree` and `map_range`, the exact path that needs no commit.
+- `crates/gix-anchor/src/anchor.rs:318-334` — `capture_context`, a pure function of `content` and `lines`, so `context` is fully derivable from data already stored.
+- `docs/specification.adoc` — `anchor.immutable` and `anchor.fuzzy-fallback` mandate the current shape.
+
+**Why it matters**
+
+The retained context blob is a per-anchor object that stores a strict subset of another field in the same tree, and its only consumer produces answers that are wrong without saying so. Meanwhile the anchor ref already keeps a full copy of the file alive, so the storage argument for not also pinning the commit is weak: you are paying for the blob and refusing the commit, which is orders of magnitude smaller.
+
+For the conference: this is the question. "Your comment survives gc" is a headline claim, and the honest current answer is "it survives, and it may quietly point at the wrong function." Someone will ask what the false-match rate is. Right now the answer is unbounded and unmeasured.
+
+**Options**
+
+- Option A — Make the note commit carry the anchor commit as an additional parent (`Binding::witnesses()`, finally used). The anchored commit stays reachable for as long as the note ref exists, `project_exact` never fails, and both the fallback and the context blob can be deleted. Trade-off: contradicts `anchor.immutable` as written, and the note ref now transitively holds a slice of project history reachable, which grows a clone that fetches `refs/anchors/*`. That growth is bounded by history you already have in the common case.
+- Option B — Keep the commit unpinned but replace `project_from_context` with the exact `map_range` diff against `anchor.content` and the target tree blob at `anchor.path`. Delete the `context` field. Trade-off: still no rename tracking without the commit — but the current fallback has none either, so nothing is lost, and every answer becomes exact and deterministic.
+- Option C — Keep the fuzzy scan but return a confidence score in the `Projection` and refuse to report `Relocated` when a second window ties the best score. Trade-off: preserves a mechanism that has no reason to exist once Option B is available.
+
+**Recommendation**
+
+Do Option B unconditionally and Option A as well if you want `project_exact` to be total. Option B alone is nearly free, deletes a stored field and a whole code path, and turns a silently-wrong answer into an exact one; I have high confidence it is correct. Option A is the more interesting talk material — "the note commit is a keep-ref for the history it is about" is a genuinely good line — but it is a spec change and reasonable people could prefer the smaller footprint. Whatever you choose, the `context` field should not survive: it is derivable from `content` and `lines`, so it is redundant storage that can go out of sync with nothing to reconcile it.
