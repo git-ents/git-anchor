@@ -1,0 +1,59 @@
+**What**
+
+`capture` and `capture_worktree` produce the same `Anchor` type but uphold different invariants. For a `capture`d anchor, `blob` is what `commit` tree holds at `path`. For a `capture_worktree` anchor it is not — the commit field is documented as "best-effort, never-load-bearing" (`anchor.rs:209-214`) and the blob is the on-disk bytes written fresh to the odb (`anchor.rs:266-269`).
+
+`project_exact_onto` assumes the first invariant. Its fast path checks `target_tree[path] == anchor.blob` (`projection.rs:348-355`), which is false for a worktree anchor. It then diffs `anchor.commit` tree against the target tree, and if no change entry names `anchor.path` it concludes the anchor is broken (`projection.rs:409-417`):
+
+```rust
+// The diff never touched the path, yet the fast path did not
+// match: the anchor blob is not what its own commit holds there,
+// so the anchor itself is broken.
+return Err(Error::MissingPath { commit: anchor_commit_id, path: anchor.path.clone() });
+```
+
+That comment describes a real invariant violation for a `capture`d anchor and a completely normal state for a worktree one.
+
+**Measured**:
+
+```
+$ printf "a\nb\nc\nDIRTY\ne\nf\ng\nh\n" > src/new.rs      # dirty the file
+$ W=$(git anchor add --worktree --path src/new.rs -L 4,4 -m "on dirty bytes")
+$ git anchor show $W@HEAD
+Error: no file at "src/new.rs" in cf593a5b0167cac57be93eb8461ea80a5b589596
+exit=1
+
+$ git anchor show $W --worktree
+current
+DIRTY
+```
+
+`src/new.rs` plainly exists in that commit. The error is false and the message actively misleads.
+
+The failure is conditional in a way that makes it worse: if the path *did* change between the anchor HEAD and the target, a `Modification` entry exists, `map_range(&anchor.content, &new, range)` runs against the embedded content, and it works fine. So the operation succeeds when history moved and fails when it did not.
+
+`project` does not rescue it either — it catches only `AnchorCommitMissing` (`projection.rs:207-212`), not `MissingPath`.
+
+**Where**
+
+- `crates/gix-anchor/src/projection.rs:340-359`, `:409-417`.
+- `crates/gix-anchor/src/anchor.rs:240-284` — `capture_worktree`.
+- `crates/git-anchor/src/main.rs:337-371` — `show` offers `@<rev>` for any position note, with no knowledge that some cannot answer.
+- `docs/specification.adoc`, `anchor.working-tree` — mandates the working tree as a capture source and as a projection target, but is silent on projecting a worktree-captured anchor onto a revision, so the current behaviour is arguably not a spec violation, only a hole.
+
+**Why it matters**
+
+The LSP composes exclusively through `capture_worktree` (`lens.rs:427`). Every comment created from the editor is therefore a worktree anchor, and every such comment gives a false error from `git comment show <id>@<rev>` until the file happens to change. A user creates a comment in Zed, asks where it sits on `main`, and is told the file does not exist.
+
+The deeper point is a type-design one: `Anchor` has two modes with different invariants and no way to tell them apart at runtime or compile time. `project_exact` cannot know which one it holds, so it guesses and guesses wrong.
+
+**Options**
+
+- Option A — Make the mode explicit: a field on `Anchor` (`origin: Committed | Worktree`), or a separate type. `project_exact` then takes the correct branch instead of inferring one. Trade-off: a format change and an enum in the serialized record — but see the format-versioning issue, which you want anyway.
+- Option B — Fix `project_exact_onto` to fall through instead of erroring. When the diff names no change at `anchor.path`, look the path up in the target tree; if it is a blob, run `map_range(&anchor.content, target_blob, range)`. That is exactly what `project_worktree` does and it is correct for both modes. The current error then only fires when the path is genuinely absent from the target tree, which is `Deleted`, not an error at all.
+- Option C — Refuse explicitly: detect at projection time that `anchor.blob` is not what `anchor.commit` holds, and return a clear error naming the real situation. Trade-off: honest but unhelpful; the operation is answerable.
+
+**Recommendation**
+
+Option B. It is a small, local change, it makes `project_exact` total for both modes, and it reuses machinery already present a hundred lines away. It also composes with the retention issue recommendation — once the fallback is an exact diff against `anchor.content`, this branch and that one become the same code.
+
+Option A is worth doing on top if you touch the record format anyway, because "these are two different things wearing one type" is true regardless of whether B papers over the symptom. Whatever you do, the current error message must go: telling the user a file does not exist in a commit where it does exist is the kind of thing that costs an hour of debugging. High confidence.

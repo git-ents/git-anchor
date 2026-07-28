@@ -1,0 +1,1 @@
+Anchor conflates committed and working-tree captures, so a worktree anchor cannot be projected onto a revision and fails with a false no-file-at-path error
