@@ -1,0 +1,37 @@
+**What**
+
+Every note is its own ref at `<prefix>/<target-hex>/<id-hex>` (`store.rs:480-482`). For a `Binding::Position`, `target` is the *anchored blob oid* (`binding.rs:200`). So the namespace fragments per file-version, and the ref count equals the note count exactly.
+
+**Where**
+
+- `crates/gix-anchor/src/store.rs:46`, `:480-482` — the layout.
+- `crates/gix-anchor/src/binding.rs:194-202` — `target()` returns the blob oid for a position binding.
+
+**Measured** on a scratch repo, 20 files x 400 lines, 400 anchors:
+
+```
+refs under refs/anchors : 400
+.git/packed-refs        : 54,503 bytes  (136 bytes per anchor)
+loose objects           : 2,545
+.git total              : 10 MB   (source text is ~150 KB)
+git ls-remote .         : 402 refs advertised
+```
+
+Linear extrapolation to the 50k-comment repo the design invites: ~6.8 MB of `packed-refs`, 50k refs in every ref advertisement, and ~1.25 GB of `.git`. `packed-refs` is re-read and re-written wholesale on ref maintenance; 50k refs is also 50k lines of advertisement on every fetch negotiation from a server that has them.
+
+Keying on the blob oid has a second cost that is independent of scale: it is the wrong grouping key for every question a user actually asks. `refs/anchors/<blob>/` groups anchors by "which exact bytes of which file version", so two comments on the same function one commit apart live in different directories. There is no way to enumerate "every anchor on `src/lib.rs`" without reading all of them — which is exactly what `Store::list` and the LSP do (see the indexing issue).
+
+**Why it matters**
+
+The "it is just refs, `git log` works on it" property is the best thing about this design and the reason the talk lands. It is also the property that does not survive contact with a repository that has a years worth of review history. An audience member who runs a monorepo will do this arithmetic in their head during the demo.
+
+**Options**
+
+- Option A — Keep one ref per anchor but shard the middle segment (`refs/anchors/<xx>/<rest-of-target>/<id>`) and document a packing/maintenance story. Trade-off: does nothing about the ref count, only about directory fanout on the loose-ref backend. Mostly cosmetic.
+- Option B — Rollup: one ref per *anchored path* (or per target commit), whose tree holds many notes as entries keyed by note id. `git ls-tree refs/anchors/src/lib.rs` still inspects it with no application, `git log` still shows history, and the ref count becomes O(files) not O(comments). Trade-off: concurrent writers now contend on one ref per file instead of one per note, so you need real merge semantics rather than the current per-ref lock. That is more work but it is also the right shape for a tree-of-notes: a merge is a tree union keyed by note id, which almost never conflicts.
+- Option C — A single `refs/notes/anchors`-style ref in git-notes layout (fanout tree keyed by target oid), which is what git itself chose for this exact problem and which existing tooling already fetches and merges. Trade-off: gives up the "one ref per anchor" aesthetic, and per-anchor history is no longer a ref history.
+- Option D — Change the position key from blob oid to path, so `refs/anchors/<path>/<id>` groups usefully. Trade-off: paths are not ref-safe without escaping, and the key stops being content-addressed.
+
+**Recommendation**
+
+Option B, and I hold this with moderate confidence — this is a genuine judgement call. The inspectability you would lose is small (a tree of notes is still `git ls-tree`-able and arguably nicer to browse than 400 sibling refs) and what you gain is a design that answers the scaling question on stage instead of deflecting it. If you do not want to change the layout before the talk, at minimum have the numbers above ready and a stated plan, because the question is coming. Independently of A-D, reconsider the blob-oid grouping key: it fragments the namespace on every edit and is not the key any query wants.

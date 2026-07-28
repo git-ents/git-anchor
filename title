@@ -1,0 +1,1 @@
+One ref per anchor, keyed by blob oid, gives inspectability but no rollup, no path index, and a ref count that scales with review volume
