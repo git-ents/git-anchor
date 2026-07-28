@@ -1,0 +1,39 @@
+**What**
+
+To compose a comment, the server sends a `WorkspaceEdit` that creates `<git-dir>/COMMENT_EDITMSG_<path>_<lines>` and fills it with a git-commit-style template (`lens.rs:364-389`, `compose.rs:113-142`). Applying the edit is what makes the client open the file. The comment is only created when a `textDocument/didSave` for that file comes back to *this* server (`lens.rs:307-315`, `:396-434`).
+
+The recent change from `window/showDocument` to `workspace/applyEdit` is the second workaround on this path; the doc comments say so directly (`lens.rs:210-214`, `compose.rs:24-28`). The flow is fighting the protocol.
+
+**Where**
+
+- `crates/gix-comment-lsp/src/lens.rs:331-350` — `is_template`, which recognizes a template purely by filename and parent directory.
+- `crates/gix-comment-lsp/src/lens.rs:364-389` — the create-and-open edit.
+- `crates/gix-comment-lsp/src/lens.rs:396-434` — `finalize_compose`.
+- `crates/gix-comment-lsp/src/compose.rs:89-106` — `template_filename`.
+- `editors/zed/extension.toml` — a fixed list of 27 languages the server attaches to.
+- `editors/zed/README.md` — "Zed extensions attach a language server to a fixed list of languages, declared in extension.toml."
+
+**Why it matters**
+
+The template lands in `.git/` with a synthesized name like `COMMENT_EDITMSG_src_lib.rs_3-4`. That name has no recognized language, and `.git/` is a directory most editors hide from the project tree. For `didSave` on that buffer to reach this server, the client must attach this language server to that buffer — which the extension own language list does not cover, by its own README description of how Zed works. If the notification does not arrive, `finalize_compose` never runs: the user types a comment, saves, sees nothing happen, and gets no error. There is no timeout, no fallback, and no acknowledgement.
+
+Secondary problems on the same path:
+
+- `CreateFile { overwrite: Some(true) }` (`lens.rs:369-372`) means two composes on the same lines silently clobber each other. The filename is the only concurrency control.
+- `is_template` fires on *any* saved file under `.git/` whose name starts with `COMMENT_EDITMSG`, with no record that this server created it.
+- `code_actions` (`lens.rs:220-243`) offers "Comment on these lines" for every range in every file with no selection check, and eagerly constructs the edit each time.
+- The template is deleted after parsing (`lens.rs:408`), so a compose that fails downstream loses the user text entirely.
+
+**Options**
+
+- Option A — Name the template so editors already know it. `.git/COMMENT_EDITMSG` is one character from `COMMIT_EDITMSG`, which Zed, VS Code, Neovim, and Emacs all detect as the `git-commit` language out of the box. Add `Git Commit` to the extension language list and the routing problem disappears without any protocol trickery. Trade-off: one shared filename means one compose in flight; encode the target inside the file (you already do) and refuse a second compose while one is open.
+- Option B — Put the template in the worktree instead of `.git/`, in a gitignored path, so it is a normal file the editor treats normally. Trade-off: litters the working tree, and a stale template could get committed.
+- Option C — Drop the file round-trip. Return the compose as a code action with a `WorkspaceEdit` that inserts a comment marker into the source buffer, and have the server pick it up on save of the *source* file. Trade-off: mutates the user code, even transiently. Probably too clever.
+- Option D — Client-specific: Zed supports server-initiated prompts via extension APIs. Trade-off: exactly what `lens.compose` says not to do, and it breaks the "reachable by any editor speaking LSP" claim in `editors/zed/src/lib.rs:8-11`.
+- Option E — Independently of the above: acknowledge or fail loudly. Publish a message on `window/showMessage` when a compose succeeds, and do not delete the template until the comment is written.
+
+**Recommendation**
+
+Option A plus Option E. Reusing the `git-commit` filetype is the cleanest possible answer here and it is very much in the spirit of the project: the composer is git own commit-message editor, so let the editor recognize it as one. It removes the language-routing gamble, gives the user syntax highlighting and the `#`-comment behaviour they already expect, and needs no protocol workaround.
+
+Option E is not optional whatever else you do. A flow that can silently discard what the user typed is not shippable, and "I typed a comment and nothing happened" is a bad thing to have happen in front of an audience. Moderate-to-high confidence; if you have already verified that Zed does route the save today, then A is a robustness improvement rather than a fix, but E still stands.

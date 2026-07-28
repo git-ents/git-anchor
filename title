@@ -1,0 +1,1 @@
+The compose flow launders a comment through a file in .git/ and depends on the client routing didSave back to this server; if it does not, the typed comment is lost with no error
