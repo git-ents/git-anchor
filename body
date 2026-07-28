@@ -1,0 +1,58 @@
+**What**
+
+A comment is a mutable ref whose tip commit supplies its metadata: `hydrate` (`gix-comment/src/comment.rs:421-435`) reads `author.name`, `author.email`, and `author.time` off the commit at the tip. Every state change is a new commit on that ref — `resolve`/`reopen` go through `set_state` (`comment.rs:404-416`) to `Store::update`, which writes a fresh commit authored by whoever ran the command.
+
+So changing a comment state rewrites who wrote it.
+
+**Measured**:
+
+```
+$ git config user.name Ada
+$ git comment add --path f.txt -L 2,2 -m "Ada: is this right?"
+$ git comment show <id>
+author: Ada <ada@example.com>
+state: open
+message:
+Ada: is this right?
+
+$ git config user.name Bob        # Bob resolves Ada thread
+$ git comment resolve <id>
+$ git comment show <id>
+author: Bob <bob@example.com>     # <-- Ada text, Bob name
+date: <the resolve time>
+state: resolved
+message:
+Ada: is this right?
+```
+
+**Where**
+
+- `crates/gix-comment/src/comment.rs:421-435` — author from the tip commit.
+- `crates/gix-comment/src/comment.rs:404-416` — `set_state` rewrites the whole note to flip one field.
+- `crates/gix-anchor/src/store.rs:356-384` — `Store::update`, the version-forward primitive.
+- `crates/gix-anchor/src/store.rs:86-95` — `Note::created_at`, the shadow timestamp that exists because the commit timestamp is the *last mutation* time, not the creation time.
+
+**Why it matters**
+
+This is a correctness problem dressed as an elegance win. "Author and timestamp come from the storage commit, nothing stored twice" is a lovely line and it is exactly right for an append-only log; it is wrong the moment the ref is mutable, because the tip stops being the creation event.
+
+The existence of `Note::created_at` is the tell. A nanosecond wall-clock field was added to the note tree specifically because the commit author time no longer means what a reader needs it to mean. That is the same bug, already patched once in the ordering path but not in the display path — `git comment show` still prints the mutation time as `date:`.
+
+For the conference: resolving a comment on stage and watching your own name replace the reviewer name is a demo-ending moment, and resolve is the most likely thing to be demonstrated after add.
+
+Concurrency has the same shape. Two people resolving the same comment produce two commits on one ref; the per-ref lock (`store.rs:611-624`) serializes them within a machine, but across clones the second push simply loses, and there is no merge story for divergent note refs.
+
+**Options**
+
+- Option A — Append-only events. A comment ref history becomes a log of events (`created`, `edited`, `resolved`, `reopened`), each its own commit authored by whoever performed it. The comment identity and author are the *genesis* commit; the current state is a fold over the log. Trade-off: reads become a history walk rather than a single tip read, and every consumer needs the fold. `Store::history` and `get_at` already exist, so most of the machinery is there. This also makes concurrent resolve a non-conflict: two `resolved` events fold to the same state.
+- Option B — Keep the mutable tip but store author and creation time explicitly in the note tree, alongside `created_at`. Trade-off: gives up the "nothing stored twice" property that motivated the current design, and re-introduces the possibility of the stored author disagreeing with the commit author (which is the thing the current design correctly wanted to avoid).
+- Option C — Keep the mutable tip but read author and time from the *genesis* commit (the last entry of `Store::history`) rather than the tip. Trade-off: one extra history walk per read, and `Store::history` is already O(chain). Cheap, and it fixes the display bug without a format change.
+- Option D — Split state out of the comment entirely: `refs/comments/.../<id>` holds the immutable comment, and resolution is a separate note keyed by the comment id. Trade-off: two objects per conversation, but resolution is genuinely a different act by a different person and modelling it as a mutation of the message was always a category error.
+
+**Recommendation**
+
+Option A is the right answer and it is also the better talk: "a comment is an event log in Git, and resolution is an event, not an edit" is a stronger claim than what the repo says today, and it makes the concurrent-resolve question answer itself. High confidence on the direction.
+
+If you do not want to change the model before the conference, do Option C this week — it is a few lines and it stops the demo from lying about who wrote what. Do not ship Option B; it trades a correct principle for a patch.
+
+Note also that binding identity to `user.email` with no signing means a comment author is whatever the writer configured. If review comments are ever going to carry weight, signed note commits are the natural extension, and an event log is the structure that makes per-event signatures meaningful.
