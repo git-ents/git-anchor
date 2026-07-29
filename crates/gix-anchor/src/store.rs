@@ -77,14 +77,13 @@ impl NoteRef {
     /// Recover a `NoteRef` from a name known to live under `prefix`. `None`
     /// when `name` is not a `<target>/<id>` leaf directly under it.
     fn parse(name: &RefName, prefix: &RefPrefix) -> Option<NoteRef> {
-        let rest = name.strip_prefix(prefix)?;
-        let (target, id) = rest.split_once('/')?;
-        if id.contains('/') {
+        let path = name.relative_to(prefix)?;
+        let [target, id] = path.segments() else {
             return None;
-        }
+        };
         Some(NoteRef {
-            target: ObjectId::from_hex(target.as_bytes()).ok()?,
-            id: ObjectId::from_hex(id.as_bytes()).ok()?,
+            target: ObjectId::from_hex(target.as_str().as_bytes()).ok()?,
+            id: ObjectId::from_hex(id.as_str().as_bytes()).ok()?,
         })
     }
 }
