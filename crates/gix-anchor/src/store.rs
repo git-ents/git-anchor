@@ -601,3 +601,427 @@ impl<'r> RepoStore<'r> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        reason = "unit test"
+    )]
+
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+
+    use facet_git_tree::ObjectStore;
+    use gix_refstore::{MemoryRefStore, Signature};
+
+    use super::*;
+
+    fn hex(byte: u8) -> ObjectId {
+        let digit = format!("{byte:x}");
+        ObjectId::from_hex(digit.repeat(40).as_bytes()).expect("valid hex")
+    }
+
+    fn prefix() -> RefPrefix {
+        RefPrefix::new(ANCHOR_PREFIX).expect("ANCHOR_PREFIX is a valid ref prefix")
+    }
+
+    fn memory_store() -> Store<MemoryRefStore, ObjectStore> {
+        Store {
+            refs: MemoryRefStore::new(),
+            objects: ObjectStore::default(),
+            prefix: prefix(),
+        }
+    }
+
+    // ── layout ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn attach_writes_the_ref_at_prefix_target_id() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"note", None).unwrap();
+
+        let expected =
+            RefName::new(format!("{}/{}/{id}", ANCHOR_PREFIX, binding.target())).unwrap();
+        assert!(store.refs.read(&expected).unwrap().is_some());
+    }
+
+    #[test]
+    fn prefix_boundary_is_a_whole_segment_not_a_string_prefix() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"note", None).unwrap();
+
+        // "refs/anchorsfoo" shares a string prefix with "refs/anchors" but is
+        // not a `/`-bounded child of it.
+        let foreign =
+            RefName::new(format!("refs/anchorsfoo/{}/{}", binding.target(), hex(2))).unwrap();
+        store
+            .refs
+            .apply(RefEdit::Create {
+                name: foreign,
+                new: hex(3),
+            })
+            .unwrap();
+
+        // Both refs really exist in the backing store...
+        assert_eq!(
+            store
+                .refs
+                .prefixed(&RefPrefix::new("refs").unwrap())
+                .unwrap()
+                .len(),
+            2
+        );
+        // ...but only the one under this store's own prefix is visible.
+        let notes = store.list(None).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].id, id);
+    }
+
+    // ── round trip, both identity schemes ───────────────────────────────
+
+    #[test]
+    fn attach_then_get_round_trips_with_no_repository() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"hello", None).unwrap();
+
+        let note = store.get(id).unwrap().expect("note exists");
+        assert_eq!(note.body, b"hello");
+        assert_eq!(note.binding, binding);
+        assert_eq!(note.target, binding.target());
+
+        let listed = store.list(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, id);
+    }
+
+    #[test]
+    fn reattach_versions_the_same_ref_forward() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id1 = store.attach(&binding, b"v1", None).unwrap();
+        let id2 = store.attach(&binding, b"v2", None).unwrap();
+        assert_eq!(id1, id2, "binding-keyed: same binding, same identity");
+        assert_eq!(store.history(id1).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn create_twice_on_the_same_binding_mints_two_distinct_refs() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let first = store.create(&binding, b"a", None, None, None, "a").unwrap();
+        let second = store.create(&binding, b"b", None, None, None, "b").unwrap();
+        assert_ne!(first, second, "genesis-keyed: distinct identities");
+        assert_eq!(store.list(Some(binding.target())).unwrap().len(), 2);
+    }
+
+    // ── created_at forwarding ────────────────────────────────────────────
+
+    #[test]
+    fn reattach_preserves_the_original_created_at() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"v1", None).unwrap();
+        let first_created_at = store.get(id).unwrap().unwrap().created_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.attach(&binding, b"v2", None).unwrap();
+
+        let second_created_at = store.get(id).unwrap().unwrap().created_at;
+        assert_eq!(second_created_at, first_created_at);
+    }
+
+    #[test]
+    fn update_preserves_the_original_created_at() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.create(&binding, b"a", None, None, None, "a").unwrap();
+        let first_created_at = store.get(id).unwrap().unwrap().created_at;
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        store.update(id, b"b", None, None, None, "b").unwrap();
+
+        let second_created_at = store.get(id).unwrap().unwrap().created_at;
+        assert_eq!(second_created_at, first_created_at);
+    }
+
+    // ── history ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn history_lists_commits_tip_first() {
+        let store = memory_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"v1", None).unwrap();
+        let first_commit = store.get(id).unwrap().unwrap().commit;
+        store.attach(&binding, b"v2", None).unwrap();
+        let second_commit = store.get(id).unwrap().unwrap().commit;
+        assert_ne!(first_commit, second_commit);
+
+        assert_eq!(
+            store.history(id).unwrap(),
+            vec![second_commit, first_commit]
+        );
+    }
+
+    // ── fault-injecting RefStore: CAS retry paths ───────────────────────
+
+    /// A scripted failure for [`FlakyRefStore::apply`].
+    enum Injection {
+        /// Land this edit for real first, so the caller's own edit then
+        /// fails against a genuine precondition mismatch on the backend —
+        /// simulates a concurrent writer that actually won the race.
+        Concurrent(RefEdit),
+        /// Create a ref at whatever name the caller's own edit targets,
+        /// using a placeholder object, before delegating — for when that
+        /// name is not known ahead of time (`create`'s genesis-derived ref).
+        Collide,
+        /// Fail immediately with nothing written — contention indistinguishable
+        /// from a real race by the caller, but the backend never changes.
+        Phantom,
+    }
+
+    /// Wraps a [`MemoryRefStore`], scripting its first `apply` calls to fail
+    /// — exercises [`Store`]'s `LostRace` retry paths without a real
+    /// concurrent writer.
+    struct FlakyRefStore {
+        inner: MemoryRefStore,
+        injections: RefCell<VecDeque<Injection>>,
+    }
+
+    impl FlakyRefStore {
+        fn new() -> Self {
+            Self {
+                inner: MemoryRefStore::new(),
+                injections: RefCell::new(VecDeque::new()),
+            }
+        }
+
+        fn push_concurrent(&self, edit: RefEdit) {
+            self.injections
+                .borrow_mut()
+                .push_back(Injection::Concurrent(edit));
+        }
+
+        fn push_collide(&self) {
+            self.injections.borrow_mut().push_back(Injection::Collide);
+        }
+
+        fn push_phantom(&self) {
+            self.injections.borrow_mut().push_back(Injection::Phantom);
+        }
+    }
+
+    impl RefStore for FlakyRefStore {
+        type Error = Infallible;
+
+        fn read(&self, name: &RefName) -> std::result::Result<Option<ObjectId>, Self::Error> {
+            self.inner.read(name)
+        }
+
+        fn prefixed(
+            &self,
+            prefix: &RefPrefix,
+        ) -> std::result::Result<Vec<(RefName, ObjectId)>, Self::Error> {
+            self.inner.prefixed(prefix)
+        }
+
+        fn apply(&self, edit: RefEdit) -> std::result::Result<(), ApplyError<Self::Error>> {
+            match self.injections.borrow_mut().pop_front() {
+                Some(Injection::Concurrent(winner)) => {
+                    self.inner
+                        .apply(winner)
+                        .expect("injected concurrent edit applies cleanly");
+                    self.inner.apply(edit)
+                }
+                Some(Injection::Collide) => {
+                    let collide = RefEdit::Create {
+                        name: edit.name().clone(),
+                        new: hex(0xA),
+                    };
+                    self.inner
+                        .apply(collide)
+                        .expect("injected collision applies cleanly");
+                    self.inner.apply(edit)
+                }
+                Some(Injection::Phantom) => Err(ApplyError::LostRace {
+                    name: edit.name().clone(),
+                    expected: edit.expectation(),
+                }),
+                None => self.inner.apply(edit),
+            }
+        }
+    }
+
+    impl Committer for FlakyRefStore {
+        type Error = Infallible;
+
+        fn signature(&self) -> std::result::Result<Signature, Self::Error> {
+            self.inner.signature()
+        }
+    }
+
+    fn flaky_store() -> Store<FlakyRefStore, ObjectStore> {
+        Store {
+            refs: FlakyRefStore::new(),
+            objects: ObjectStore::default(),
+            prefix: prefix(),
+        }
+    }
+
+    /// Writes a note commit directly, bypassing every [`Store`] write
+    /// method — stands in for a concurrent writer's version when scripting
+    /// a [`FlakyRefStore::push_concurrent`] injection.
+    fn write_note_commit(
+        store: &Store<FlakyRefStore, ObjectStore>,
+        binding_id: ObjectId,
+        body: &[u8],
+        created_at: u64,
+        parent: Option<ObjectId>,
+    ) -> ObjectId {
+        let note = Note {
+            body: body.to_vec(),
+            binding: RawTree::new(binding_id),
+            attachment: None,
+            parent: None,
+            state: None,
+            created_at,
+        };
+        let tree = facet_git_tree::serialize_into(&note, &store.objects).expect("serialize note");
+        store
+            .write_commit("concurrent", tree, parent)
+            .expect("write concurrent commit")
+    }
+
+    #[test]
+    fn attach_with_attachment_retries_and_forwards_the_winners_created_at() {
+        let store = flaky_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"v1", None).unwrap();
+        let refname = store.note_ref(binding.target(), id);
+        let original_tip = store.refs.read(&refname).unwrap().unwrap();
+        let original_created_at = store.get(id).unwrap().unwrap().created_at;
+
+        let winner_created_at = original_created_at.wrapping_add(1_000_000);
+        let winner_commit = write_note_commit(
+            &store,
+            id,
+            b"concurrent",
+            winner_created_at,
+            Some(original_tip),
+        );
+        store.refs.push_concurrent(RefEdit::Update {
+            name: refname.clone(),
+            expected: original_tip,
+            new: winner_commit,
+        });
+
+        let id2 = store
+            .attach_with_attachment(&binding, b"v2", None, None)
+            .unwrap();
+        assert_eq!(id2, id);
+
+        let after = store.get(id).unwrap().unwrap();
+        assert_eq!(after.body, b"v2");
+        assert_eq!(
+            after.created_at, winner_created_at,
+            "forwards the race winner's created_at, not a fresh timestamp"
+        );
+        assert_eq!(
+            store.history(id).unwrap().len(),
+            3,
+            "original, the concurrent winner, and the retried write"
+        );
+    }
+
+    #[test]
+    fn update_retries_and_carries_the_winners_binding_and_created_at_forward() {
+        let store = flaky_store();
+        let original_binding = Binding::Commit { commit: hex(1) };
+        let id = store
+            .create(&original_binding, b"a", None, None, None, "a")
+            .unwrap();
+        let refname = store.note_ref(original_binding.target(), id);
+        let original_tip = store.refs.read(&refname).unwrap().unwrap();
+
+        // A concurrent writer's version carries a different binding and a
+        // distinguishable created_at: `update` must pick both up off the
+        // winning tip, not off the value read before the race.
+        let winner_binding = Binding::Commit { commit: hex(2) };
+        let winner_binding_id = winner_binding.serialize_into(&store.objects).unwrap();
+        let winner_created_at = 123_456_789;
+        let winner_commit = write_note_commit(
+            &store,
+            winner_binding_id,
+            "concurrent".as_bytes(),
+            winner_created_at,
+            Some(original_tip),
+        );
+        store.refs.push_concurrent(RefEdit::Update {
+            name: refname.clone(),
+            expected: original_tip,
+            new: winner_commit,
+        });
+
+        store
+            .update(id, b"edited", None, None, None, "edit")
+            .unwrap();
+
+        let after = store.get(id).unwrap().unwrap();
+        assert_eq!(after.body, b"edited");
+        assert_eq!(
+            after.binding, winner_binding,
+            "carries the race winner's binding forward"
+        );
+        assert_eq!(after.created_at, winner_created_at);
+    }
+
+    #[test]
+    fn remove_retries_and_deletes_the_winning_tip() {
+        let store = flaky_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"v1", None).unwrap();
+        let refname = store.note_ref(binding.target(), id);
+        let original_tip = store.refs.read(&refname).unwrap().unwrap();
+
+        let winner_commit = write_note_commit(&store, id, b"concurrent", 42, Some(original_tip));
+        store.refs.push_concurrent(RefEdit::Update {
+            name: refname.clone(),
+            expected: original_tip,
+            new: winner_commit,
+        });
+
+        assert!(store.remove(id).unwrap());
+        assert!(store.get(id).unwrap().is_none());
+        assert!(store.refs.read(&refname).unwrap().is_none());
+    }
+
+    #[test]
+    fn create_returns_genesis_exists_when_the_ref_is_present_after_a_lost_race() {
+        let store = flaky_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        store.refs.push_collide();
+
+        let err = store
+            .create(&binding, b"body", None, None, None, "msg")
+            .unwrap_err();
+        assert!(matches!(err, Error::GenesisExists(_)));
+    }
+
+    #[test]
+    fn create_retries_to_success_on_pure_contention() {
+        let store = flaky_store();
+        let binding = Binding::Commit { commit: hex(1) };
+        store.refs.push_phantom();
+
+        let id = store
+            .create(&binding, b"body", None, None, None, "msg")
+            .unwrap();
+        assert_eq!(store.get(id).unwrap().unwrap().body, b"body");
+    }
+}
