@@ -4,10 +4,10 @@ A cryptographic claim primitive for git: signed, immutable statements binding a 
 Two crates, this repo's established shape: **`gix-attest`** (library) and **`git-attest`** (CLI, invoked as `git attest`).
 
 This is new design, not a port — unlike `gix-anchor`, there is no `../git-ents` source to extract and no `gix-store` precedent for signing.
-`gix-anchor`'s ref-store pattern (`refs/anchors/<target-oid>/<id>`, `refname.rs`-style validation, notes-style commits) is the closest existing *model*, but note it is not the shared *engine*: `gix-anchor`'s `store.rs`/`refname.rs` are a local reimplementation — its only dependency on `../git-store` is the `facet-git-tree` codec, despite `DEVPLAN.md:56` recommending a `gix-store` dependency.
-The shared storage layers now live in `../git-store` as two crates:
+`gix-anchor`'s ref-store pattern (`refs/anchors/<target-oid>/<id>`, notes-style commits) is the closest existing model, and since Phase 0 it is also the shared *engine*: `gix-anchor` now stores through `gix-refstore` rather than its own copy of it.
+The shared storage layers live in `../git-store` as two crates:
 
-- **`gix-refstore`** — trait-based CAS ref persistence (`RefStore`/`Committer`, `RefName`/`RefSegment` validation, `GixRefStore` over a real repo with the same per-ref lock scheme `gix-anchor` hand-rolled, `MemoryRefStore` for tests).
+- **`gix-refstore`** — trait-based CAS ref persistence (`RefStore`/`Committer`, `RefName`/`RefSegment` validation, `GixRefStore` over a real repo, `MemoryRefStore` for tests).
 - **`gix-store`** — typed kinds/schemas/entities as commit chains (`{value/, schema/}` trees, `Schema:` trailer provenance), generic over any `RefStore` + object database.
 
 `gix-attest` should build on these rather than growing a third copy of the ref-CAS machinery (see Phase 2 candidate (c) and Phase 4).
@@ -73,6 +73,24 @@ This is a storage-layer swap, not a rewrite of the crate.
 
 ### Stages (each independently reviewable and committable)
 
+**Done, 2026-07-29.**
+Shipped in four commits rather than the six stages planned below, because stages 1–5 could not be separated without a transitional `Store` holding both a `&Repository` and a ref backend — two sources of truth for the same state, which the type system should forbid rather than host.
+What landed: `923fd1c` types the ref layout (a private `NoteRef { target, id }` whose construction is infallible, since an `ObjectId`'s hex is always a valid `RefSegment` — `refname.rs` and `Error::InvalidRefComponent` deleted), `3d83edd` swaps the engine, `d338351` adds the `MemoryRefStore` tests, `2e7c52d` fixes an author-identity regression the review caught.
+
+Three things the plan below did not anticipate:
+
+- **The reflog watch item was a non-issue.**
+  Anchor refs never had a reflog: git enables them by default only under `refs/heads`, `refs/remotes`, `refs/notes` and `HEAD`.
+  Verified empirically on both sides of the change rather than reasoned about.
+- **Removing the lock widened the retry loop, not just the ref edit.**
+  The old code held its lock across read-tip → read `created_at` → commit.
+  With CAS, everything derived from the tip has to be re-read per attempt, or a note appearing mid-flight gets a fresh `created_at` instead of the existing one's — a silent data bug no existing test could have caught.
+- **`create` cannot retry a fixed edit.**
+  Its ref name derives from the genesis commit's own oid, and `apply` reports both a taken identity and transient lock contention as `LostRace`.
+  It distinguishes them by reading the ref: present means taken (`Error::GenesisExists`), absent means retry.
+
+The stage list as originally planned:
+
 1. **Dependency + `RepoStore` skeleton.**
    Add `gix-refstore` as a git dep; introduce `Store<R, O>` generic over `RefStore + Committer` / `Find + Write` with the `RepoStore<'r>` alias and `Store::open`/`with_prefix` preserved as constructors over it.
    No behavior change yet — the internals may still route through the old code paths.
@@ -95,10 +113,22 @@ This is a storage-layer swap, not a rewrite of the crate.
 
 ### Acceptance
 
-- `cargo test --workspace` green, doctests included, with `tests/store.rs`'s behavioral assertions unmodified.
+All met.
+
+- `cargo test --workspace` green, doctests included; `tests/store.rs` is byte-for-byte unmodified, not merely behaviorally unmodified.
 - `git anchor add/list/show/project/remove` still round-trips against a scratch repo.
 - No per-ref locking, CAS retry, or refname validation code remains in `crates/gix-anchor/`.
-- `DEVPLAN.md:56`'s recommendation is finally true, and `DEVPLAN.md` is updated to say so rather than still posing it as an open decision.
+- `DEVPLAN.md:56`'s recommendation is finally true, and `DEVPLAN.md` says so rather than posing it as an open decision.
+
+One acceptance criterion was added in flight: the CAS paths must be *covered*, not merely working.
+The pre-existing suite needed a tempdir repo and ran sequentially, so it could not reach a lost race at all — the migration's own oracle was blind to the part that changed most.
+`d338351` closes that with a fault-injecting `RefStore` decorator that lands a real conflicting edit before the caller's, so the lost race comes from the backend's own precondition check rather than a fabricated error.
+Each retry test was checked to fail when its loop is reverted.
+
+**Substrate change this phase forced.**
+`Committer` yielded one signature, used as both author and committer, which silently overwrote authorship for any repository setting `author.*`/`GIT_AUTHOR_*` apart from the committer — a regression against `gix::Repository::commit`.
+Fixed upstream in git-store (`4581dcf`) as a `Committer::author` provided method defaulting to `signature`, so no implementor breaks and `gix-store` is corrected too.
+This is the first evidence for the Phase 4 sub-decision below: the `Committer`/`Signer` boundary is where identity and signing belong, and extending it upstream works without breaking existing backends.
 
 ### Explicitly not in this phase
 

@@ -57,8 +57,8 @@ Follow `gix-store`'s pattern (`store.rs`/`refname.rs`): serialized anchor trees 
 Recommend depending on it — the user said to *use* git-store, and it keeps retention (`anchor.retention`: content stored as real blobs, never gitlinks) in one place.
 
 **What actually shipped, and the correction:** this recommendation was not followed — `store.rs`/`refname.rs` reimplement per-ref locking, CAS retry, and refname validation locally, taking only `facet-git-tree` from git-store.
-`../git-store` has since factored exactly that layer out as `gix-refstore`, and `DEVPLAN-attest.md` Phase 0 migrates this crate onto it before `gix-attest` is built, so the family ends up with one ref-CAS engine rather than two.
-Treat that phase, not this line, as the live plan.
+`../git-store` has since factored exactly that layer out as `gix-refstore`, and `DEVPLAN-attest.md` Phase 0 migrated this crate onto it (done 2026-07-29), so the family has one ref-CAS engine rather than two.
+Treat that phase, not this line, as the record of what shipped.
 
 ## Phase 4 — `crates/git-anchor` (CLI)
 
