@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "facet-git-tree"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#39249ff0ab0d8ebea29ec9c4c933fef52802d44f"
+source = "git+https://github.com/git-ents/git-store#9309baa000c62e03bb830882d76948783bc15934"
 dependencies = [
  "facet",
  "facet-value",
@@ -721,7 +721,7 @@ dependencies = [
  "facet-git-tree",
  "gix",
  "gix-object",
- "gix-refstore",
+ "gix-store",
  "proptest",
  "rstest",
  "tempfile",
@@ -1223,7 +1223,7 @@ dependencies = [
 [[package]]
 name = "gix-refstore"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#39249ff0ab0d8ebea29ec9c4c933fef52802d44f"
+source = "git+https://github.com/git-ents/git-store#9309baa000c62e03bb830882d76948783bc15934"
 dependencies = [
  "gix",
  "gix-hash",
@@ -1287,6 +1287,19 @@ dependencies = [
  "gix-hash",
  "gix-lock",
  "nonempty",
+ "thiserror",
+]
+
+[[package]]
+name = "gix-store"
+version = "0.1.0"
+source = "git+https://github.com/git-ents/git-store#9309baa000c62e03bb830882d76948783bc15934"
+dependencies = [
+ "facet",
+ "facet-git-tree",
+ "facet-value",
+ "gix",
+ "gix-refstore",
  "thiserror",
 ]
 
