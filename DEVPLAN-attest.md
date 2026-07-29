@@ -4,7 +4,14 @@ A cryptographic claim primitive for git: signed, immutable statements binding a 
 Two crates, this repo's established shape: **`gix-attest`** (library) and **`git-attest`** (CLI, invoked as `git attest`).
 
 This is new design, not a port — unlike `gix-anchor`, there is no `../git-ents` source to extract and no `gix-store` precedent for signing.
-`gix-anchor`'s ref-store pattern (`refs/anchors/<target-oid>/<id>`, `refname.rs`-style validation, notes-style commits) is the closest existing model and should inform, not dictate, this design.
+`gix-anchor`'s ref-store pattern (`refs/anchors/<target-oid>/<id>`, `refname.rs`-style validation, notes-style commits) is the closest existing *model*, but note it is not the shared *engine*: `gix-anchor`'s `store.rs`/`refname.rs` are a local reimplementation — its only dependency on `../git-store` is the `facet-git-tree` codec, despite `DEVPLAN.md:56` recommending a `gix-store` dependency.
+The shared storage layers now live in `../git-store` as two crates:
+
+- **`gix-refstore`** — trait-based CAS ref persistence (`RefStore`/`Committer`, `RefName`/`RefSegment` validation, `GixRefStore` over a real repo with the same per-ref lock scheme `gix-anchor` hand-rolled, `MemoryRefStore` for tests).
+- **`gix-store`** — typed kinds/schemas/entities as commit chains (`{value/, schema/}` trees, `Schema:` trailer provenance), generic over any `RefStore` + object database.
+
+`gix-attest` should build on these rather than growing a third copy of the ref-CAS machinery (see Phase 1 candidate (c) and Phase 3).
+One known gap to resolve upstream: `gix-store`'s commit writer emits unsigned commits (`extra_headers: Vec::new()` in `store.rs`), and signed commits are this design's canonical claim encoding — see Phase 3.
 
 ## Non-negotiable boundaries (do not relitigate)
 
@@ -74,9 +81,14 @@ Work:
   (handles ranges/pairs uniformly, since it hashes the *canonical form*, not
   a single oid); (b) a flat `refs/attest/<claim-id>` namespace with an
   index object (commit trailer or tree entry) carrying the target binding,
-  scanned or indexed separately; (c) depending on `gix-anchor`'s store
-  module directly (as a library dependency, not a copy) if its notes-style
-  engine generalizes to non-single-oid targets without contortion.
+  scanned or indexed separately; (c) `gix-store`'s own
+  `refs/store/<kind>/<name>` layout, if claims are stored as a `gix-store`
+  kind (see Phase 3) — its `<name>` is a single `RefSegment`, so target-key
+  grouping would live in an index or in the segment derivation, not in ref
+  nesting.
+- Whichever layout wins, ref *persistence* is `gix-refstore` (git dep on `../git-store`, same as `facet-git-tree` today): `RefName`/`RefSegment` validation replaces a local `refname.rs`, and `RefStore::apply`'s CAS replaces a hand-rolled lock/retry loop.
+  Do **not** depend on `gix-anchor`'s `store.rs` for this — it is anchor-semantic (`Binding`-keyed identities, a `remove()` that deletes refs, directly at odds with boundary 3) and is itself a local duplicate of what `gix-refstore` now provides.
+  The layout decision is thereby decoupled from the engine decision: (a)/(b)/(c) differ only in ref naming and discovery, not in who does the CAS.
 - Prototype (b) is worth taking seriously even though (a) is the closest
   analogy: unlike an anchor, a claim's identity (the claim-id) is
   independent of its target's oid in a way that matters for `revoke`, which
@@ -96,6 +108,9 @@ Can start once Phase 0's target type exists; does not need Phase 1 resolved (use
   target), `Principal` (signing identity — reuse whatever key-identity
   representation git's own commit signing uses, do not invent a new one),
   `Claim` (principal + predicate + target + signature, immutable), `ClaimId`.
+- `Predicate` should be evaluated against `gix-store`'s schema model before inventing its own hashing: a `gix-store` kind is already a *published, content-addressed schema* (`refs/schema/<kind>`, `schema/` subtree, `Schema:` trailer provenance carried by every entity).
+  If a predicate *is* a published `facet-git-tree` `Schema`, its content hash is the schema tree's own oid — free, canonical, and shared vocabulary with every other `gix-store` consumer.
+  Only diverge if a predicate turns out not to be schema-shaped (record why in the spec doc if so).
 - `verify(claim, trust_root) -> VerifyOutcome` — **this is the boundary enforcement point.**
   `VerifyOutcome` must be a closed type that can express only: signature valid/invalid, target binding intact/broken, signer resolves under `trust_root` yes/no/unresolvable, and a structural/parse error variant.
   It must have **no variant, field, or string-typed escape hatch** that could carry a predicate-satisfaction verdict — see Testing strategy for how this is checked structurally, not just by review.
@@ -113,13 +128,16 @@ Acceptance: `gix-attest` compiles and tests green with no dependency on Phase 1'
 
 Depends on Phase 1's decision.
 
-- Implement the chosen ref layout.
-  If depending on `gix-anchor` as a library (candidate (c) above), take it as a normal crate dependency — do not vendor or fork.
-- Signed commits as the storage encoding for claims (per design: "imposes discipline on git's existing signing machinery," not a new object type).
-  Confirm how `Claim`'s fields map onto a commit's author/committer/message/ signature fields and where the predicate hash and target encoding live (commit trailer vs. tree entry) — this is a sub-decision of Phase 1, name it explicitly in the ref-layout design note rather than deciding it ad hoc while coding.
-- Retention: nothing deleted (boundary 3) — verify this holds structurally
-  for the chosen layout (e.g. `revoke` must not be capable of force-updating
-  or deleting the revoked claim's ref).
+- Storage layering (bottom-up): `gix-refstore` for ref persistence (non-negotiable — see Phase 1), and `gix-store`'s kind/schema engine on top of it *if* the claim document fits its entity model.
+  Both are normal git deps on `../git-store`, like `facet-git-tree` today — do not vendor, fork, or copy either, and do not route storage through `gix-anchor`'s `store.rs`.
+- **Sub-decision — signing hook (blocks full `gix-store` reuse).**
+  Signed commits are the storage encoding for claims (per design: "imposes discipline on git's existing signing machinery," not a new object type), but `gix-store`'s `write_commit` currently emits `extra_headers: Vec::new()` — no `gpgsig`, so it cannot write a claim commit today.
+  Two ways through, decide with the `../git-store` maintainer hat on: (i) extend `gix-store` upstream with a signing hook (a `Signer` counterpart to the existing `Committer` trait, threading a `gpgsig` extra-header through `write_commit`) and store claims as a `gix-store` kind — preferred, since it keeps one commit-writing engine and gives every future `gix-store` consumer signing for free; (ii) interim fallback: use `gix-refstore` directly and write signed claim commits inside `gix-attest` — acceptable to unblock this repo, but record it as debt that converges on (i).
+  Either way `verify` reads the signature off the raw commit object, so the read path is identical under both.
+- Confirm how `Claim`'s fields map onto a commit's author/committer/message/signature fields and where the predicate hash and target encoding live (commit trailer vs. tree entry) — this is a sub-decision of Phase 1, name it explicitly in the ref-layout design note rather than deciding it ad hoc while coding.
+  Note `gix-store` already answers part of this if claims are entities: predicate-as-schema lands in the `schema/` subtree + `Schema:` trailer (Phase 2), leaving only the target encoding to place.
+- Retention: nothing deleted (boundary 3) — verify this holds structurally for the chosen layout (e.g. `revoke` must not be capable of force-updating or deleting the revoked claim's ref).
+  Both upstream engines expose deletion (`gix-store`'s `Kind::remove`, `RefEdit`-level deletes) — `gix-attest`'s public API must not re-export or wrap any of it, and claim writes should use a create-only expectation (`MustNotExist`-shaped `RefEdit::Create`), never an update, since a claim is immutable — unlike anchors/notes, a claim ref's history is always exactly one commit.
 
 Acceptance: round-trip a claim through storage and back (`sign` writes, `show`/`log` reads) against a scratch repo fixture, using `test-support`'s `init_repo` convention.
 
@@ -173,6 +191,10 @@ Acceptance: DSSE decision recorded in the spec doc with its evidence, even if th
 - Storage/ref layout: fixture-based integration tests asserting revocation
   never deletes or rewrites a ref (boundary 3) — assert the pre-revocation
   ref still resolves to the same commit oid after `revoke` runs.
+- Storage unit tests can run against `gix-refstore`'s `MemoryRefStore`
+  (no tempdir repo needed) for layout/CAS/immutability logic, with real-repo
+  fixtures reserved for the signing path and CLI integration — a testing
+  seam `gix-anchor`'s welded-to-`gix::Repository` store never had.
 - CLI: per-subcommand integration tests per `git-anchor/tests/cli.rs`
   convention, plus an explicit test that `verify`'s exit code distinguishes
   invalid-outcome from could-not-run (Phase 4).
@@ -195,18 +217,21 @@ Acceptance: DSSE decision recorded in the spec doc with its evidence, even if th
 
 1. Target grammar closure (Phase 0) — gates everything.
 2. Ref layout (Phase 1) — gates Phase 3; independent of Phase 2.
-3. Claim-id / public-key targeting: does `Target` (Phase 0's type) need
-   variants for non-git-object targets (a `ClaimId`, a public key), or is
-   revocation/key-rotation modeled as a distinct binding outside `Target`
-   entirely? (raised in Phase 2 — see Inconsistencies below)
+3. Claim-id / public-key targeting: does `Target` (Phase 0's type) need variants for non-git-object targets (a `ClaimId`, a public key), or is revocation/key-rotation modeled as a distinct binding outside `Target` entirely?
+   (raised in Phase 2 — see Inconsistencies below)
 4. Commit-encoding sub-decision of ref layout: predicate hash and target
    encoding as commit trailer vs. tree entry (Phase 3).
 5. DSSE/in-toto interop: export-as-conversion vs. envelope passthrough
    (Phase 5) — recommend export-as-conversion pending consumer survey.
-6. Whether `gix-attest` depends on `gix-anchor` as a library for ref
-   persistence (ref-layout candidate (c)) vs. an independent minimal
-   ref-store layer, mirroring `gix-anchor`'s own open decision about
-   `gix-store` in `DEVPLAN.md:56`.
+6. How far up the `../git-store` stack to build: `gix-refstore` for ref
+   persistence is settled (see Phase 1 — not open), but whether claims are
+   full `gix-store` entities hinges on the signing-hook sub-decision
+   (Phase 3): extend `gix-store` upstream with a `Signer` hook (preferred)
+   vs. interim signed-commit writing over bare `gix-refstore`.
+7. Whether to migrate `gix-anchor` itself onto `gix-refstore`/`gix-store` —
+   out of scope for `git-attest`, but the drift is now on record (see
+   Inconsistencies) and doing it would leave one storage engine across the
+   family instead of two.
 
 ## Internal inconsistencies flagged (not silently resolved)
 
@@ -219,3 +244,8 @@ Acceptance: DSSE decision recorded in the spec doc with its evidence, even if th
   `gix-anchor`'s `refs/anchors/<target-oid>/<id>` layout (the nearest precedent) assumes a single stable oid per target.
   Commit-range and hybrid tree-pair targets have no single oid; Phase 1 must pick a derivation (e.g. hash of the canonical target form) rather than reuse the oid-keyed pattern verbatim.
   Flagged here so the temptation to copy `gix-anchor`'s layout unmodified is caught before it's coded, not after.
+- **`gix-anchor` never took the `gix-store` dependency it recommended.**
+  `DEVPLAN.md:56` recommends depending on `gix-store` for ref persistence; the shipped `gix-anchor` instead reimplemented the layer locally (`store.rs`/`refname.rs` — per-ref locks, CAS retry, refname validation), taking only `facet-git-tree` from `../git-store`.
+  `../git-store` has since factored exactly that layer out as `gix-refstore`, so the code `gix-anchor` duplicated now exists as a reusable crate.
+  This plan's earlier draft pointed ref-layout candidate (c) at `gix-anchor`'s store as if it were the shared engine — it is not; the shared engine is `gix-refstore`/`gix-store`, and this plan now targets those directly.
+  Migrating `gix-anchor` itself is open decision 7, not this plan's job.
