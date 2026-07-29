@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use gix::ObjectId;
 use gix::bstr::ByteSlice as _;
-use gix_anchor::{Binding, RefPrefix, Store, StoredNote};
+use gix_anchor::{Binding, RefPrefix, RepoStore, StoredNote};
 
 use crate::error::{Error, Result};
 
@@ -137,7 +137,7 @@ pub struct Thread {
 /// timestamped by whoever committed it.
 pub struct Comments<'r> {
     repo: &'r gix::Repository,
-    store: Store<'r>,
+    store: RepoStore<'r>,
 }
 
 impl<'r> Comments<'r> {
@@ -149,7 +149,7 @@ impl<'r> Comments<'r> {
         let prefix = RefPrefix::new("refs/comments").expect("valid ref prefix");
         Comments {
             repo,
-            store: Store::with_prefix(repo, prefix),
+            store: RepoStore::with_prefix(repo, prefix),
         }
     }
 

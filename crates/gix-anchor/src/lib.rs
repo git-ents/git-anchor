@@ -118,4 +118,4 @@ pub use projection::{
     Content, PROJECTION_HEURISTIC_VERSION, Position, Projection, project, project_candidates,
     project_exact, project_from_context, project_many, project_worktree,
 };
-pub use store::{Store, StoredNote};
+pub use store::{RepoStore, Store, StoredNote};

@@ -20,8 +20,8 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use gix::ObjectId;
 use gix_anchor::{
-    Anchor, Binding, LineRange, Projection, Store, StoredNote, capture, capture_worktree, project,
-    project_worktree, snippet,
+    Anchor, Binding, LineRange, Projection, RepoStore, Store, StoredNote, capture,
+    capture_worktree, project, project_worktree, snippet,
 };
 
 #[derive(Parser)]
@@ -187,7 +187,7 @@ fn main() -> Result<()> {
 
 /// `add`: build the binding (a position, with `--path`, or the revision
 /// itself), gather the body, and attach it.
-fn cmd_add(repo: &gix::Repository, store: &Store, args: AddArgs) -> Result<()> {
+fn cmd_add(repo: &gix::Repository, store: &RepoStore<'_>, args: AddArgs) -> Result<()> {
     let AddArgs {
         object,
         path,
@@ -259,7 +259,7 @@ fn cmd_add(repo: &gix::Repository, store: &Store, args: AddArgs) -> Result<()> {
 
 /// `edit`: reattach a note's binding with a replacement body, seeding the
 /// editor (when reached) with the note's current body.
-fn cmd_edit(store: &Store, args: EditArgs) -> Result<()> {
+fn cmd_edit(store: &RepoStore<'_>, args: EditArgs) -> Result<()> {
     let EditArgs { id, message, file } = args;
     let note = resolve_note(store, &id)?;
     let seed = String::from_utf8_lossy(&note.body).into_owned();
@@ -271,7 +271,7 @@ fn cmd_edit(store: &Store, args: EditArgs) -> Result<()> {
 
 /// `append`: reattach a note's binding with new content joined onto the
 /// existing body by a blank line, `git notes append` style.
-fn cmd_append(store: &Store, args: EditArgs) -> Result<()> {
+fn cmd_append(store: &RepoStore<'_>, args: EditArgs) -> Result<()> {
     let EditArgs { id, message, file } = args;
     let note = resolve_note(store, &id)?;
     let addition = body_source(message.as_deref(), file.as_ref(), "")?;
@@ -292,7 +292,7 @@ fn cmd_append(store: &Store, args: EditArgs) -> Result<()> {
 /// `target` (the anchored blob) is not.
 fn cmd_list(
     repo: &gix::Repository,
-    store: &Store,
+    store: &RepoStore<'_>,
     object: Option<String>,
     json: bool,
 ) -> Result<()> {
@@ -336,7 +336,7 @@ fn cmd_list(
 /// `--worktree` projects onto the working tree.
 fn cmd_show(
     repo: &gix::Repository,
-    store: &Store,
+    store: &RepoStore<'_>,
     spec: &str,
     json: bool,
     worktree: bool,
@@ -372,7 +372,7 @@ fn cmd_show(
 
 /// `log`: a note's version history, newest first — `<oid> <iso-date>
 /// <summary>` per version.
-fn cmd_log(repo: &gix::Repository, store: &Store, id: &str) -> Result<()> {
+fn cmd_log(repo: &gix::Repository, store: &RepoStore<'_>, id: &str) -> Result<()> {
     let note = resolve_note(store, id)?;
     for commit_id in store.history(note.id)? {
         let commit = repo.find_commit(commit_id)?;
@@ -473,7 +473,7 @@ fn print_projection(
 
 /// `remove`: delete every listed note, having resolved all of them first so
 /// an ambiguous or missing id leaves every note untouched.
-fn cmd_remove(store: &Store, ids: &[String]) -> Result<()> {
+fn cmd_remove(store: &RepoStore<'_>, ids: &[String]) -> Result<()> {
     let notes: Vec<StoredNote> = ids
         .iter()
         .map(|id| resolve_note(store, id))
@@ -532,7 +532,7 @@ fn edit_in_editor(seed: &str) -> Result<String> {
 
 /// Resolve a note id, accepting an unambiguous hex prefix. Errors when no
 /// note matches, or when more than one does.
-fn resolve_note(store: &Store, prefix: &str) -> Result<StoredNote> {
+fn resolve_note(store: &RepoStore<'_>, prefix: &str) -> Result<StoredNote> {
     let mut matches: Vec<StoredNote> = store
         .list(None)?
         .into_iter()

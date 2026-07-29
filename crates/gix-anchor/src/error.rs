@@ -74,17 +74,13 @@ pub enum Error {
         /// The entry names actually present in that tree.
         entries: Vec<String>,
     },
-    /// A [`crate::Store::attach`] write lost its compare-and-swap race too
-    /// many times in a row.
-    #[error("gave up updating {refname} after {attempts} contended attempts")]
-    CasExhausted {
-        /// The ref that stayed contended.
-        refname: String,
-        /// How many attempts were made before giving up.
-        attempts: u32,
-    },
-    /// Any underlying `gix` failure from [`crate::Store`]'s ref, commit, or
-    /// lock-file operations, collapsed to a single variant with the
+    /// [`crate::Store::create`] minted a genesis commit whose oid already
+    /// names an existing note ref — an identity collision rather than a
+    /// transient compare-and-swap race, so retrying would spin forever.
+    #[error("genesis commit {0} already has a note ref")]
+    GenesisExists(gix::ObjectId),
+    /// Any underlying failure from [`crate::Store`]'s ref-store, committer,
+    /// or object-database backend, collapsed to a single variant with the
     /// original error preserved as its source.
     #[error(transparent)]
     Git(Box<dyn std::error::Error + Send + Sync + 'static>),
