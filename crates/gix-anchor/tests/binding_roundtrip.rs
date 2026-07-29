@@ -23,33 +23,34 @@ use gix_object::{Kind, Tree, Write as _};
 
 /// The root tree's oid, exactly as the current code produces it for an
 /// anchor at `file.txt`, lines 3..=4, in a 10-line numbered file.
-const ROOT: &str = "002b45e6824a3a9723ebc245104426c43ccf91be";
+const ROOT: &str = "0a3871b5ab7a4c1cbb6c97a0344747ef86d954ca";
 
 /// `blob` entry: [`gix_anchor::Anchor::blob`]'s 20 raw bytes, embedded —
 /// equal to `CONTENT_OID`'s own bytes, by content addressing
 /// (`anchor.retention`).
-const BLOB_ENTRY_OID: &str = "4a3354a7c472ad13ffd9fb0e30d9a8fd66efd0b5";
+const BLOB_ENTRY_OID: &str = "50459e630a2f7b4507d79cf0de3cc5d85787d825";
 const BLOB_ENTRY_RAW: &str = "fa2da6e55caa540725b55c04d13f1e42b4c725ce";
 
 /// `commit` entry: [`gix_anchor::Anchor::commit`]'s 20 raw bytes, embedded
 /// (an arbitrary, best-effort commit id — it need not resolve to a real
 /// object in this fixture).
-const COMMIT_ENTRY_OID: &str = "a662e760fcd5534f59d7c7d72e401a646ac1a88f";
+const COMMIT_ENTRY_OID: &str = "13b6fa8bdbfa8bd548ddb6ef9f444bdb1033b220";
 const COMMIT_ENTRY_RAW: &str = "92cf309c4efcf8698a5bd8f82d56f68fd38cc963";
 
-/// `content` entry: the anchored blob's own bytes, `"line 1\n"` through
-/// `"line 10\n"`.
+/// `content` entry: the anchored blob's bytes as serialized storage leaf.
+const CONTENT_ENTRY_OID: &str = "3647a46fdccdf81dcf568159c84d88e660a95e3d";
+/// Anchored blob oid (`blob` entry payload / `Anchor::blob()`).
 const CONTENT_OID: &str = "fa2da6e55caa540725b55c04d13f1e42b4c725ce";
 /// `context` entry: a three-line margin around lines 3..=4, `"line 1\n"`
 /// through `"line 7\n"`.
-const CONTEXT_OID: &str = "734156dc73cccb9703067e6366f3d09266e090dd";
+const CONTEXT_OID: &str = "167d19634ea4a2335202b28f0fd463da7d1df4b2";
 
-const LINES_OID: &str = "b76e73cdb409fa346566f18e8f054dbdf04a7304";
-const LINES_SOME_OID: &str = "3433ad944c71f4b15c4de9e87568ae4cf03feb50";
-const LINES_END_OID: &str = "bf0d87ab1b2b0ec1a11a3973d2845b42413d9767";
-const LINES_START_OID: &str = "e440e5c842586965a7fb77deda2eca68612b1f53";
+const LINES_OID: &str = "5a429aeb1df6f3e6a457cd3a7fdb7b48bc685d1c";
+const LINES_SOME_OID: &str = "87795e3d27f78f365a1561024559a36ae0409c76";
+const LINES_END_OID: &str = "b8626c4cff2849624fb67f87cd0ad72b163671ad";
+const LINES_START_OID: &str = "00750edc07d6415dcc07ae0351e9397b0222b7ba";
 
-const PATH_OID: &str = "4c330738cc959751fb6760a91a50d9e58cfe5cb9";
+const PATH_OID: &str = "42d995590468e16e3a192a81518166b7dddac2a0";
 
 fn oid(hex: &str) -> gix::ObjectId {
     gix::ObjectId::from_hex(hex.as_bytes()).expect("valid hex oid")
@@ -82,21 +83,29 @@ fn entry(name: &str, kind: EntryKind, id: gix::ObjectId) -> Entry {
 fn build_fixture() -> (gix::ObjectId, ObjectStore) {
     let store = ObjectStore::default();
 
-    let blob_entry = write_blob(&store, oid(BLOB_ENTRY_RAW).as_slice());
+    let mut blob_entry_bytes = oid(BLOB_ENTRY_RAW).as_slice().to_vec();
+    blob_entry_bytes.push(b'\n');
+    let blob_entry = write_blob(&store, &blob_entry_bytes);
     assert_eq!(blob_entry.to_string(), BLOB_ENTRY_OID);
 
-    let commit_entry = write_blob(&store, oid(COMMIT_ENTRY_RAW).as_slice());
+    let mut commit_entry_bytes = oid(COMMIT_ENTRY_RAW).as_slice().to_vec();
+    commit_entry_bytes.push(b'\n');
+    let commit_entry = write_blob(&store, &commit_entry_bytes);
     assert_eq!(commit_entry.to_string(), COMMIT_ENTRY_OID);
 
-    let content = write_blob(&store, numbered(1..=10).as_bytes());
-    assert_eq!(content.to_string(), CONTENT_OID);
+    let mut content_bytes = numbered(1..=10).into_bytes();
+    content_bytes.push(b'\n');
+    let content = write_blob(&store, &content_bytes);
+    assert_eq!(content.to_string(), CONTENT_ENTRY_OID);
 
-    let context = write_blob(&store, numbered(1..=7).as_bytes());
+    let mut context_bytes = numbered(1..=7).into_bytes();
+    context_bytes.push(b'\n');
+    let context = write_blob(&store, &context_bytes);
     assert_eq!(context.to_string(), CONTEXT_OID);
 
-    let end = write_blob(&store, b"4");
+    let end = write_blob(&store, b"4\n");
     assert_eq!(end.to_string(), LINES_END_OID);
-    let start = write_blob(&store, b"3");
+    let start = write_blob(&store, b"3\n");
     assert_eq!(start.to_string(), LINES_START_OID);
     let some = write_tree(
         &store,
@@ -109,7 +118,7 @@ fn build_fixture() -> (gix::ObjectId, ObjectStore) {
     let lines = write_tree(&store, vec![entry("some", EntryKind::Tree, some)]);
     assert_eq!(lines.to_string(), LINES_OID);
 
-    let path = write_blob(&store, b"file.txt");
+    let path = write_blob(&store, b"file.txt\n");
     assert_eq!(path.to_string(), PATH_OID);
 
     let root = write_tree(
