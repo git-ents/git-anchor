@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "facet-git-tree"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#345901c6a5260bc06868c42cd7481dc815a560f6"
+source = "git+https://github.com/git-ents/git-store#4581dcf28586a7d616e3c31c4546bc60f25f2b4b"
 dependencies = [
  "facet",
  "facet-value",
@@ -1223,7 +1223,7 @@ dependencies = [
 [[package]]
 name = "gix-refstore"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#345901c6a5260bc06868c42cd7481dc815a560f6"
+source = "git+https://github.com/git-ents/git-store#4581dcf28586a7d616e3c31c4546bc60f25f2b4b"
 dependencies = [
  "gix",
  "gix-hash",
@@ -2305,7 +2305,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",

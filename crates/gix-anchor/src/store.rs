@@ -534,12 +534,11 @@ where
         tree: ObjectId,
         parent: Option<ObjectId>,
     ) -> Result<ObjectId> {
-        let signature = self.refs.signature().map_err(Error::git)?;
         let commit = gix::objs::Commit {
             tree,
             parents: parent.into_iter().collect(),
-            author: signature.clone(),
-            committer: signature,
+            author: self.refs.author().map_err(Error::git)?,
+            committer: self.refs.signature().map_err(Error::git)?,
             encoding: None,
             message: message.into(),
             extra_headers: Vec::new(),
@@ -872,6 +871,68 @@ mod tests {
             objects: ObjectStore::default(),
             prefix: prefix(),
         }
+    }
+
+    /// A backend whose author and committer identities differ, as a
+    /// repository configuring `author.*` apart from `committer.*` does.
+    struct SplitIdentity(MemoryRefStore);
+
+    impl RefStore for SplitIdentity {
+        type Error = Infallible;
+
+        fn read(&self, name: &RefName) -> std::result::Result<Option<ObjectId>, Self::Error> {
+            self.0.read(name)
+        }
+
+        fn prefixed(
+            &self,
+            prefix: &RefPrefix,
+        ) -> std::result::Result<Vec<(RefName, ObjectId)>, Self::Error> {
+            self.0.prefixed(prefix)
+        }
+
+        fn apply(&self, edit: RefEdit) -> std::result::Result<(), ApplyError<Self::Error>> {
+            self.0.apply(edit)
+        }
+    }
+
+    impl Committer for SplitIdentity {
+        type Error = Infallible;
+
+        fn signature(&self) -> std::result::Result<Signature, Self::Error> {
+            let mut signature = self.0.signature()?;
+            signature.name = "Committer".into();
+            Ok(signature)
+        }
+
+        fn author(&self) -> std::result::Result<Signature, Self::Error> {
+            let mut signature = self.0.signature()?;
+            signature.name = "Author".into();
+            Ok(signature)
+        }
+    }
+
+    #[test]
+    fn a_notes_author_comes_from_the_author_identity_not_the_committer() {
+        let store = Store {
+            refs: SplitIdentity(MemoryRefStore::new()),
+            objects: ObjectStore::default(),
+            prefix: prefix(),
+        };
+        let binding = Binding::Commit { commit: hex(1) };
+        let id = store.attach(&binding, b"note", None).unwrap();
+        let commit = store.history(id).unwrap()[0];
+
+        let (author, committer) = store
+            .with_commit(commit, |c| {
+                Ok((
+                    c.author().unwrap().name.to_string(),
+                    c.committer().unwrap().name.to_string(),
+                ))
+            })
+            .unwrap();
+        assert_eq!(author, "Author");
+        assert_eq!(committer, "Committer");
     }
 
     /// Writes a note commit directly, bypassing every [`Store`] write
