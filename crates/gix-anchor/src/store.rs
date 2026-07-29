@@ -1,16 +1,16 @@
 //! [`Store`]: notes — arbitrary content attached to a [`Binding`]'s target —
-//! persisted as Git refs and commits, git-notes style.
+//! persisted as `gix-store` entities of one kind, `notes`.
 //!
 //! Two identity schemes, chosen by write method:
 //! - **Binding-keyed** ([`Store::attach`]/[`Store::attach_with_attachment`]):
-//!   one ref per (target, binding-identity), keyed by the binding's own
+//!   one note per (target, binding-identity), keyed by the binding's own
 //!   serialized tree oid. Re-attaching a binding commits a new version
-//!   forward onto the same ref.
-//! - **Genesis-keyed** ([`Store::create`]/[`Store::update`]): one ref per
-//!   note *instance*, keyed by the oid of the parentless commit
-//!   [`Store::create`] mints — never the binding's — so two notes about the
-//!   same binding (a reply and what it replies to) get distinct identities.
-//!   [`Store::update`] versions one forward by id.
+//!   forward onto the same entity.
+//! - **Genesis-keyed** ([`Store::create`]/[`Store::update`]): one note per
+//!   *instance*, keyed by the oid of the commit [`Store::create`] mints —
+//!   never the binding's — so two notes about the same binding (a reply and
+//!   what it replies to) get distinct identities. [`Store::update`] versions
+//!   one forward by id.
 //!
 //! Every note also carries `parent` and `state`, opaque to this crate
 //! (`None` for the binding-keyed scheme) — a downstream consumer like
@@ -19,9 +19,9 @@
 use facet::Facet;
 use facet_git_tree::RawTree;
 use gix::ObjectId;
-use gix::objs::{CommitRef, Find, FindExt, Write};
-use gix_refstore::{
-    ApplyError, Committer, GixRefStore, RefEdit, RefName, RefPrefix, RefSegment, RefStore,
+use gix::objs::{Find, Write};
+use gix_store::{
+    Committer, Entry, GixRefStore, Kind, Layout, RefPath, RefPrefix, RefSegment, RefStore, Typed,
 };
 
 use crate::binding::Binding;
@@ -29,6 +29,10 @@ use crate::error::{Error, Result};
 
 /// [`Store::open`]'s default prefix.
 const ANCHOR_PREFIX: &str = "refs/anchors";
+
+/// The one kind every note is an entity of, whatever its target, so a single
+/// published schema covers the whole store.
+const NOTES_KIND: &str = "notes";
 
 /// The document committed at a note's ref: `body`, the [`Binding`] it is
 /// attached to, an optional `attachment` tree, and opaque `parent`/`state`
@@ -60,48 +64,66 @@ fn now_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-/// A note ref's two path components under a [`Store`]'s prefix:
-/// `<prefix>/<target-hex>/<id-hex>`.
-struct NoteRef {
+/// A note's entity name under the `notes` kind: `<target-hex>/<id-hex>`.
+///
+/// Target first, so every note about one target is a single ref subtree —
+/// what [`Store::list`] narrows to with one `target`.
+struct NoteName {
     target: ObjectId,
     id: ObjectId,
 }
 
-impl NoteRef {
-    fn to_ref_name(&self, prefix: &RefPrefix) -> RefName {
-        prefix
-            .child(&hex_segment(self.target))
-            .join(&hex_segment(self.id))
+impl NoteName {
+    fn path(&self) -> RefPath {
+        Self::group(self.target).join(&hex(self.id))
     }
 
-    /// Recover a `NoteRef` from a name known to live under `prefix`. `None`
-    /// when `name` is not a `<target>/<id>` leaf directly under it.
-    fn parse(name: &RefName, prefix: &RefPrefix) -> Option<NoteRef> {
-        let path = name.relative_to(prefix)?;
+    /// The single-segment path every note about `target` nests under.
+    fn group(target: ObjectId) -> RefPath {
+        RefPath::from(hex(target))
+    }
+
+    /// `None` when `path` is not a `<target-hex>/<id-hex>` pair — the depth
+    /// check is the slice pattern, not a separate guard.
+    fn parse(path: &RefPath) -> Option<Self> {
         let [target, id] = path.segments() else {
             return None;
         };
-        Some(NoteRef {
-            target: ObjectId::from_hex(target.as_str().as_bytes()).ok()?,
-            id: ObjectId::from_hex(id.as_str().as_bytes()).ok()?,
+        Some(NoteName {
+            target: oid(target)?,
+            id: oid(id)?,
         })
     }
 }
 
 /// An [`ObjectId`]'s hex rendering is always a valid ref-name segment.
-fn hex_segment(id: ObjectId) -> RefSegment {
+fn hex(id: ObjectId) -> RefSegment {
     RefSegment::new(id.to_string()).expect("object id hex is a valid ref segment")
 }
 
-/// A content-addressed store of notes over a [`RefStore`]/[`Committer`] and
-/// an object database, git-notes style: one note per identity (binding- or
-/// genesis-keyed, depending on which write method is used), editable with
-/// full history.
+fn oid(segment: &RefSegment) -> Option<ObjectId> {
+    ObjectId::from_hex(segment.as_str().as_bytes()).ok()
+}
+
+fn segment(value: &str) -> RefSegment {
+    RefSegment::new(value).expect("built-in ref segment is valid")
+}
+
+/// Notes at `<prefix>/data/notes/<target-hex>/<id-hex>`, the kind's schema at
+/// `<prefix>/schema/notes` — disjoint subtrees, so no kind can ever collide
+/// with the schema namespace and a data walk never filters a schema out.
+fn layout(prefix: &RefPrefix) -> Layout {
+    Layout {
+        data: prefix.child(&segment("data")),
+        schema: prefix.child(&segment("schema")),
+    }
+}
+
+/// A store of notes over a [`RefStore`]/[`Committer`] and an object database:
+/// one note per identity (binding- or genesis-keyed, depending on which write
+/// method is used), editable with full history.
 pub struct Store<R, O> {
-    refs: R,
-    objects: O,
-    /// Where this store's refs live: `<prefix>/<target-hex>/<id-hex>`.
-    prefix: RefPrefix,
+    inner: gix_store::Store<R, O>,
 }
 
 /// A note read back from the [`Store`].
@@ -140,6 +162,13 @@ where
     R: RefStore + Committer,
     O: Find + Write,
 {
+    /// Open a store over `refs` and `objects`, rooted at `prefix`.
+    pub fn new(refs: R, objects: O, prefix: &RefPrefix) -> Self {
+        Store {
+            inner: gix_store::Store::with_layout(refs, objects, layout(prefix)),
+        }
+    }
+
     /// Attach `body` to the object `binding` names, git-notes style: one
     /// note per (target, binding-identity), editable with history.
     /// `message` sets the commit summary, defaulting to `anchor <target>`.
@@ -181,50 +210,28 @@ where
         message: Option<&str>,
     ) -> Result<ObjectId> {
         let target = binding.target();
-        let id = binding.serialize_into(&self.objects)?;
-        let refname = self.note_ref(target, id);
-
+        let id = binding.serialize_into(self.inner.objects())?;
         let default_summary = format!("anchor {target}");
         let summary = message.unwrap_or(&default_summary);
 
-        loop {
-            let tip = self.refs.read(&refname).map_err(Error::git)?;
-            // A re-attach forwards the original `created_at` rather than
-            // resetting it, so editing a note never changes its place in a
-            // caller's creation-order tiebreak. Read fresh every iteration:
-            // a note that appeared between iterations must forward *its*
-            // `created_at`, not a brand-new timestamp.
-            let created_at = match tip {
-                Some(commit) => self.created_at_at(commit)?,
-                None => now_nanos(),
-            };
-            let note = Note {
-                body: body.to_vec(),
-                binding: RawTree::new(id),
-                attachment: attachment.map(RawTree::new),
-                parent: None,
-                state: None,
-                created_at,
-            };
-            let tree = facet_git_tree::serialize_into(&note, &self.objects)?;
-            let commit = self.write_commit(summary, tree, tip)?;
-            let edit = match tip {
-                Some(expected) => RefEdit::Update {
-                    name: refname.clone(),
-                    expected,
-                    new: commit,
-                },
-                None => RefEdit::Create {
-                    name: refname.clone(),
-                    new: commit,
-                },
-            };
-            match self.refs.apply(edit) {
-                Ok(()) => return Ok(id),
-                Err(ApplyError::LostRace { .. }) => continue,
-                Err(ApplyError::Backend(err)) => return Err(Error::git(err)),
-            }
-        }
+        self.published()?
+            .update(&NoteName { target, id }.path(), |current| {
+                (
+                    summary.to_owned(),
+                    Note {
+                        body: body.to_vec(),
+                        binding: RawTree::new(id),
+                        attachment: attachment.map(RawTree::new),
+                        parent: None,
+                        state: None,
+                        // A re-attach keeps the note's place in a caller's
+                        // creation-order tiebreak, so it forwards whatever
+                        // version it commits over rather than restamping.
+                        created_at: current.map_or_else(now_nanos, |entry| entry.value.created_at),
+                    },
+                )
+            })?;
+        Ok(id)
     }
 
     /// Create a genesis-keyed note: `body` (plus an optional `attachment`,
@@ -244,8 +251,7 @@ where
     ///
     /// Propagates a [`Binding::serialize_into`] or `Note` serialization
     /// failure, and any underlying ref-store or object-database failure
-    /// ([`Error::Git`]). [`Error::GenesisExists`] in the practically
-    /// unreachable case that the minted genesis oid already names a note.
+    /// ([`Error::Git`]).
     pub fn create(
         &self,
         binding: &Binding,
@@ -256,46 +262,21 @@ where
         message: &str,
     ) -> Result<ObjectId> {
         let target = binding.target();
-        let binding_id = binding.serialize_into(&self.objects)?;
-
         let note = Note {
             body: body.to_vec(),
-            binding: RawTree::new(binding_id),
+            binding: RawTree::new(binding.serialize_into(self.inner.objects())?),
             attachment: attachment.map(RawTree::new),
             parent,
             state,
             created_at: now_nanos(),
         };
-        let tree = facet_git_tree::serialize_into(&note, &self.objects)?;
-
-        // A parentless commit written directly to the object database, with
-        // no ref pointing at it yet: its own oid — unpredictable ahead of
-        // time, unlike the binding-keyed scheme's deterministic id — becomes
-        // this note's genesis identity once the ref below is created.
-        let genesis = self.write_commit(message, tree, None)?;
-
-        let refname = self.note_ref(target, genesis);
-        loop {
-            match self.refs.apply(RefEdit::Create {
-                name: refname.clone(),
-                new: genesis,
-            }) {
-                Ok(()) => return Ok(genesis),
-                // `apply` reports both a genuine precondition failure and
-                // transient lock contention as a lost race. Here the ref name
-                // is derived from `genesis` itself, so only the ref's own
-                // existence distinguishes them: present means this identity
-                // is taken and retrying would spin forever; absent means we
-                // merely hit contention, and the retry terminates once it
-                // clears.
-                Err(ApplyError::LostRace { .. }) => {
-                    if self.refs.read(&refname).map_err(Error::git)?.is_some() {
-                        return Err(Error::GenesisExists(genesis));
-                    }
-                }
-                Err(ApplyError::Backend(err)) => return Err(Error::git(err)),
-            }
-        }
+        // The identity is the minted commit's own oid — unpredictable ahead of
+        // time, unlike the binding-keyed scheme's deterministic id.
+        let notes = self.published()?;
+        Ok(notes
+            .write(&note)
+            .message(message)
+            .anonymous_under(&NoteName::group(target))?)
     }
 
     /// Commit a new version of the genesis-keyed note `id` forward onto its
@@ -319,41 +300,29 @@ where
         state: Option<String>,
         message: &str,
     ) -> Result<ObjectId> {
-        let Some((refname, _)) = self.find_ref(id)? else {
+        let Some(name) = self.find(id)? else {
             return Err(Error::Resolve(id.to_string()));
         };
+        let missing = || Error::Resolve(id.to_string());
 
-        loop {
-            let Some(tip) = self.refs.read(&refname).map_err(Error::git)? else {
-                return Err(Error::Resolve(id.to_string()));
-            };
-            // Both re-read off the current tip every iteration, so a
-            // version that lands between iterations is what gets carried
-            // forward, not a stale read from before the loop started.
-            let binding_id = self.binding_oid_at(tip)?;
-            let created_at = self.created_at_at(tip)?;
-
-            let note = Note {
-                body: body.to_vec(),
-                binding: RawTree::new(binding_id),
-                attachment: attachment.map(RawTree::new),
-                parent: parent.clone(),
-                state: state.clone(),
-                created_at,
-            };
-            let tree = facet_git_tree::serialize_into(&note, &self.objects)?;
-            let commit = self.write_commit(message, tree, Some(tip))?;
-            let edit = RefEdit::Update {
-                name: refname.clone(),
-                expected: tip,
-                new: commit,
-            };
-            match self.refs.apply(edit) {
-                Ok(()) => return Ok(id),
-                Err(ApplyError::LostRace { .. }) => continue,
-                Err(ApplyError::Backend(err)) => return Err(Error::git(err)),
-            }
-        }
+        self.published()?.try_update::<Error>(&name, |current| {
+            // `binding` and `created_at` come off whatever version this
+            // commits over, so a concurrent write is carried forward rather
+            // than clobbered — and a concurrent *delete* is refused.
+            let current = current.ok_or_else(missing)?;
+            Ok((
+                message.to_owned(),
+                Note {
+                    body: body.to_vec(),
+                    binding: RawTree::new(current.value.binding.oid()),
+                    attachment: attachment.map(RawTree::new),
+                    parent: parent.clone(),
+                    state: state.clone(),
+                    created_at: current.value.created_at,
+                },
+            ))
+        })?;
+        Ok(id)
     }
 
     /// Every stored note, or only those attached to `target` when given,
@@ -364,14 +333,18 @@ where
     /// Propagates a ref, commit, or tree-read failure, and a malformed or
     /// unrecognized stored [`Binding`] shape.
     pub fn list(&self, target: Option<ObjectId>) -> Result<Vec<StoredNote>> {
-        let prefix = match target {
-            Some(target) => self.prefix.child(&hex_segment(target)),
-            None => self.prefix.clone(),
+        let notes = self.notes();
+        let names = match target {
+            Some(target) => notes.list_under(&NoteName::group(target))?,
+            None => notes.list()?,
         };
         let mut out = Vec::new();
-        for (refname, tip) in self.refs.prefixed(&prefix).map_err(Error::git)? {
-            if let Some(note) = self.note_at_ref(&refname, tip)? {
-                out.push(note);
+        for name in names {
+            let Some(note) = NoteName::parse(&name) else {
+                continue;
+            };
+            if let Some(entry) = notes.get_entry(&name)? {
+                out.push(self.stored(note.id, entry)?);
             }
         }
         out.sort_by_key(|note| note.id);
@@ -386,8 +359,11 @@ where
     /// Propagates a ref, commit, or tree-read failure, and a malformed or
     /// unrecognized stored [`Binding`] shape.
     pub fn get(&self, id: ObjectId) -> Result<Option<StoredNote>> {
-        match self.find_ref(id)? {
-            Some((refname, tip)) => self.note_at_ref(&refname, tip),
+        let Some(name) = self.find(id)? else {
+            return Ok(None);
+        };
+        match self.notes().get_entry(&name)? {
+            Some(entry) => self.stored(id, entry).map(Some),
             None => Ok(None),
         }
     }
@@ -406,7 +382,8 @@ where
     /// is actually reachable from any note ref, nor that `id` is really the
     /// note this `commit` belongs to.
     pub fn get_at(&self, id: ObjectId, commit: ObjectId) -> Result<StoredNote> {
-        self.note_at_commit(id, commit)
+        let entry = self.notes().get_entry_at(commit)?;
+        self.stored(id, entry)
     }
 
     /// Delete a note's ref. Returns whether it existed.
@@ -415,25 +392,10 @@ where
     ///
     /// Propagates a ref-lookup or deletion failure.
     pub fn remove(&self, id: ObjectId) -> Result<bool> {
-        let Some((refname, _)) = self.find_ref(id)? else {
+        let Some(name) = self.find(id)? else {
             return Ok(false);
         };
-        loop {
-            let Some(tip) = self.refs.read(&refname).map_err(Error::git)? else {
-                return Ok(false);
-            };
-            let edit = RefEdit::Delete {
-                name: refname.clone(),
-                expected: tip,
-            };
-            match self.refs.apply(edit) {
-                Ok(()) => return Ok(true),
-                // The ref moved (a concurrent attach/update) since our read
-                // above: re-read and delete whatever is there now.
-                Err(ApplyError::LostRace { .. }) => continue,
-                Err(ApplyError::Backend(err)) => return Err(Error::git(err)),
-            }
-        }
+        Ok(self.notes().remove(&name)?)
     }
 
     /// The version history (commit ids, tip-first) of a note. Empty if
@@ -443,135 +405,61 @@ where
     ///
     /// Propagates a ref or commit-read failure.
     pub fn history(&self, id: ObjectId) -> Result<Vec<ObjectId>> {
-        match self.find_ref(id)? {
-            Some((refname, _)) => self.ref_history(&refname),
+        match self.find(id)? {
+            Some(name) => Ok(self.notes().history(&name)?),
             None => Ok(Vec::new()),
         }
     }
 
     // ── internals ────────────────────────────────────────────────────────
 
-    /// `<prefix>/<target>/<id>`.
-    fn note_ref(&self, target: ObjectId, id: ObjectId) -> RefName {
-        NoteRef { target, id }.to_ref_name(&self.prefix)
+    fn notes(&self) -> Kind<'_, Typed<Note>, R, O> {
+        self.inner.kind(segment(NOTES_KIND))
     }
 
-    /// Read the note at `refname`, known to point at `tip` — shared by
-    /// [`Store::get`] (a fresh [`RefStore::read`]) and [`Store::list`] (the
-    /// tip [`RefStore::prefixed`] already returned, so no second read).
-    /// `None` when `refname` is not a `<target>/<id>` leaf under this
-    /// store's prefix.
-    fn note_at_ref(&self, refname: &RefName, tip: ObjectId) -> Result<Option<StoredNote>> {
-        let Some(note_ref) = NoteRef::parse(refname, &self.prefix) else {
-            return Ok(None);
-        };
-        self.note_at_commit(note_ref.id, tip).map(Some)
+    /// [`Self::notes`] with its schema published, for the write paths.
+    ///
+    /// Publishing commits forward unconditionally, so this checks first —
+    /// otherwise every open would mint a fresh, identical schema commit.
+    fn published(&self) -> Result<Kind<'_, Typed<Note>, R, O>> {
+        let notes = self.notes();
+        if notes.schema().get()?.is_none() {
+            notes.publish()?;
+        }
+        Ok(notes)
     }
 
-    /// Read the note document committed at `commit` directly, under the
-    /// given identity `id` — shared by [`Store::note_at_ref`] (`id` from the
-    /// ref leaf) and [`Store::get_at`] (any commit off a note's history,
-    /// `id` from the caller).
-    fn note_at_commit(&self, id: ObjectId, commit: ObjectId) -> Result<StoredNote> {
-        let (tree, message) = self.with_commit(commit, |c| {
-            Ok((c.tree(), c.message().summary().to_string()))
-        })?;
-        let note: Note = facet_git_tree::deserialize(&tree, &self.objects)?;
-        let binding_id = note.binding.oid();
-        let binding = Binding::deserialize(&binding_id, &self.objects)?;
-        let target = binding.target();
+    /// The entity name of the note with identity `id`, or `None` when there is
+    /// none.
+    ///
+    /// Both identity schemes name an entity `<target>/<id>`, and `id` alone
+    /// does not carry its target, so this scans the kind's ref names — never
+    /// its objects — for the one whose second segment matches.
+    fn find(&self, id: ObjectId) -> Result<Option<RefPath>> {
+        Ok(self
+            .notes()
+            .list()?
+            .into_iter()
+            .find(|name| NoteName::parse(name).is_some_and(|note| note.id == id)))
+    }
+
+    /// Recover the domain shape of a note read back at `entry`, under the
+    /// identity `id` its entity name carries.
+    fn stored(&self, id: ObjectId, entry: Entry<Note>) -> Result<StoredNote> {
+        let note = entry.value;
+        let binding = Binding::deserialize(&note.binding.oid(), self.inner.objects())?;
         Ok(StoredNote {
             id,
-            target,
+            target: binding.target(),
             binding,
             body: note.body,
-            message,
+            message: entry.message,
             attachment: note.attachment.map(|attachment| attachment.oid()),
             parent: note.parent,
             state: note.state,
-            commit,
+            commit: entry.commit,
             created_at: note.created_at,
         })
-    }
-
-    /// [`Note::created_at`] read back off `commit` — [`Store::attach_with_attachment`]'s
-    /// and [`Store::update`]'s helper for forwarding a note's original
-    /// creation order unchanged across a re-attach or a version-forward.
-    fn created_at_at(&self, commit: ObjectId) -> Result<u64> {
-        let tree = self.commit_tree(commit)?;
-        let note: Note = facet_git_tree::deserialize(&tree, &self.objects)?;
-        Ok(note.created_at)
-    }
-
-    /// The oid of the note document's own `binding` entry at `commit`,
-    /// without decoding it into a full [`Binding`] — [`Store::update`]'s
-    /// helper for carrying an existing note's binding forward unchanged,
-    /// cheaper than round-tripping through [`Binding::deserialize`] and back
-    /// through [`Binding::serialize_into`] for a value that is not changing.
-    fn binding_oid_at(&self, commit: ObjectId) -> Result<ObjectId> {
-        let tree = self.commit_tree(commit)?;
-        let note: Note = facet_git_tree::deserialize(&tree, &self.objects)?;
-        Ok(note.binding.oid())
-    }
-
-    /// The ref of the note with identity `id`, and the tip it points at,
-    /// scanning every ref under this store's prefix for a matching leaf id.
-    /// `None` when no such note exists.
-    fn find_ref(&self, id: ObjectId) -> Result<Option<(RefName, ObjectId)>> {
-        for (refname, tip) in self.refs.prefixed(&self.prefix).map_err(Error::git)? {
-            if NoteRef::parse(&refname, &self.prefix).is_some_and(|note_ref| note_ref.id == id) {
-                return Ok(Some((refname, tip)));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Write a commit object, without touching any ref.
-    fn write_commit(
-        &self,
-        message: &str,
-        tree: ObjectId,
-        parent: Option<ObjectId>,
-    ) -> Result<ObjectId> {
-        let commit = gix::objs::Commit {
-            tree,
-            parents: parent.into_iter().collect(),
-            author: self.refs.author().map_err(Error::git)?,
-            committer: self.refs.signature().map_err(Error::git)?,
-            encoding: None,
-            message: message.into(),
-            extra_headers: Vec::new(),
-        };
-        self.objects.write(&commit).map_err(Error::git)
-    }
-
-    /// First-parent walk of a ref's commits, tip-first; empty when absent.
-    fn ref_history(&self, refname: &RefName) -> Result<Vec<ObjectId>> {
-        let mut out = Vec::new();
-        let mut cursor = self.refs.read(refname).map_err(Error::git)?;
-        while let Some(id) = cursor {
-            out.push(id);
-            cursor = self.with_commit(id, |c| Ok(c.parents().next()))?;
-        }
-        Ok(out)
-    }
-
-    /// The tree of the commit `id` points at.
-    fn commit_tree(&self, id: ObjectId) -> Result<ObjectId> {
-        self.with_commit(id, |c| Ok(c.tree()))
-    }
-
-    /// Read an object as a commit and hand it to `f`. `Error::Git` when it
-    /// is absent or not a valid commit.
-    fn with_commit<T>(
-        &self,
-        id: ObjectId,
-        f: impl FnOnce(&CommitRef<'_>) -> Result<T>,
-    ) -> Result<T> {
-        let mut buf = Vec::new();
-        let data = self.objects.find(&id, &mut buf).map_err(Error::git)?;
-        let commit = CommitRef::from_bytes(data.data, data.object_hash).map_err(Error::git)?;
-        f(&commit)
     }
 }
 
@@ -592,11 +480,7 @@ impl<'r> RepoStore<'r> {
     /// `refs/comments`, say) gets its own non-colliding tree of refs.
     #[must_use]
     pub fn with_prefix(repo: &'r gix::Repository, prefix: RefPrefix) -> Self {
-        Store {
-            refs: GixRefStore::new(repo),
-            objects: &repo.objects,
-            prefix,
-        }
+        Store::new(GixRefStore::new(repo), &repo.objects, &prefix)
     }
 }
 
@@ -614,11 +498,13 @@ mod tests {
     use std::convert::Infallible;
 
     use facet_git_tree::ObjectStore;
-    use gix_refstore::{MemoryRefStore, Signature};
+    use gix::actor::Signature;
+    use gix::objs::FindExt;
+    use gix_store::{ApplyError, MemoryRefStore, RefEdit, RefName};
 
     use super::*;
 
-    fn hex(byte: u8) -> ObjectId {
+    fn oid_of(byte: u8) -> ObjectId {
         let digit = format!("{byte:x}");
         ObjectId::from_hex(digit.repeat(40).as_bytes()).expect("valid hex")
     }
@@ -628,11 +514,7 @@ mod tests {
     }
 
     fn memory_store() -> Store<MemoryRefStore, ObjectStore> {
-        Store {
-            refs: MemoryRefStore::new(),
-            objects: ObjectStore::default(),
-            prefix: prefix(),
-        }
+        Store::new(MemoryRefStore::new(), ObjectStore::default(), &prefix())
     }
 
     // ── layout ───────────────────────────────────────────────────────────
@@ -641,48 +523,100 @@ mod tests {
     fn attach_writes_the_ref_at_prefix_target_id() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"note", None).unwrap();
 
-        let expected =
-            RefName::new(format!("{}/{}/{id}", ANCHOR_PREFIX, binding.target())).unwrap();
-        assert!(store.refs.read(&expected).unwrap().is_some());
+        let expected = RefName::new(format!(
+            "{ANCHOR_PREFIX}/data/{NOTES_KIND}/{}/{id}",
+            binding.target()
+        ))
+        .unwrap();
+        assert!(store.inner.refs().read(&expected).unwrap().is_some());
     }
 
     #[test]
     fn prefix_boundary_is_a_whole_segment_not_a_string_prefix() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"note", None).unwrap();
 
         // "refs/anchorsfoo" shares a string prefix with "refs/anchors" but is
         // not a `/`-bounded child of it.
-        let foreign =
-            RefName::new(format!("refs/anchorsfoo/{}/{}", binding.target(), hex(2))).unwrap();
+        let foreign = RefName::new(format!(
+            "refs/anchorsfoo/{}/{}",
+            binding.target(),
+            oid_of(2)
+        ))
+        .unwrap();
         store
-            .refs
+            .inner
+            .refs()
             .apply(RefEdit::Create {
-                name: foreign,
-                new: hex(3),
+                name: foreign.clone(),
+                new: oid_of(3),
             })
             .unwrap();
 
-        // Both refs really exist in the backing store...
-        assert_eq!(
-            store
-                .refs
-                .prefixed(&RefPrefix::new("refs").unwrap())
-                .unwrap()
-                .len(),
-            2
-        );
-        // ...but only the one under this store's own prefix is visible.
+        // The foreign ref really is there in the backing store...
+        assert!(store.inner.refs().read(&foreign).unwrap().is_some());
+        // ...but only what lives under this store's own prefix is a note.
         let notes = store.list(None).unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].id, id);
+    }
+
+    /// Notes are one kind whatever they are attached to, so the schema is
+    /// published once for the whole store — not once per target. This is why
+    /// an entity name is allowed to nest at all.
+    #[test]
+    fn every_target_shares_one_published_schema() {
+        let store = memory_store();
+        for byte in 1..=4 {
+            let binding = Binding::Commit {
+                commit: oid_of(byte).into(),
+            };
+            store.attach(&binding, b"note", None).unwrap();
+        }
+
+        let schemas = store
+            .inner
+            .refs()
+            .prefixed(&prefix().child(&segment("schema")))
+            .unwrap();
+        assert_eq!(
+            schemas.len(),
+            1,
+            "four targets, one schema ref: {schemas:?}"
+        );
+        assert_eq!(store.inner.kinds().unwrap(), vec![segment(NOTES_KIND)]);
+    }
+
+    /// Neither identity scheme may truncate its name: a shortened segment
+    /// would put the note namespace's collision odds below the object
+    /// database's own.
+    #[test]
+    fn both_identity_schemes_name_entities_by_full_oids() {
+        let store = memory_store();
+        let binding = Binding::Commit {
+            commit: oid_of(1).into(),
+        };
+        let attached = store.attach(&binding, b"note", None).unwrap();
+        let created = store
+            .create(&binding, b"note", None, None, None, "create")
+            .unwrap();
+
+        for id in [attached, created] {
+            let name = store.find(id).unwrap().expect("note exists");
+            let [target, leaf] = name.segments() else {
+                panic!("entity name is a <target>/<id> pair: {name}");
+            };
+            assert_eq!(target.as_str(), binding.target().to_string());
+            assert_eq!(leaf.as_str(), id.to_string());
+            assert_eq!(leaf.as_str().len(), 40, "full hex, not truncated");
+        }
     }
 
     // ── round trip, both identity schemes ───────────────────────────────
@@ -691,7 +625,7 @@ mod tests {
     fn attach_then_get_round_trips_with_no_repository() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"hello", None).unwrap();
 
@@ -709,7 +643,7 @@ mod tests {
     fn reattach_versions_the_same_ref_forward() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id1 = store.attach(&binding, b"v1", None).unwrap();
         let id2 = store.attach(&binding, b"v2", None).unwrap();
@@ -721,7 +655,7 @@ mod tests {
     fn create_twice_on_the_same_binding_mints_two_distinct_refs() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let first = store.create(&binding, b"a", None, None, None, "a").unwrap();
         let second = store.create(&binding, b"b", None, None, None, "b").unwrap();
@@ -735,7 +669,7 @@ mod tests {
     fn reattach_preserves_the_original_created_at() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"v1", None).unwrap();
         let first_created_at = store.get(id).unwrap().unwrap().created_at;
@@ -751,7 +685,7 @@ mod tests {
     fn update_preserves_the_original_created_at() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.create(&binding, b"a", None, None, None, "a").unwrap();
         let first_created_at = store.get(id).unwrap().unwrap().created_at;
@@ -769,7 +703,7 @@ mod tests {
     fn history_lists_commits_tip_first() {
         let store = memory_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"v1", None).unwrap();
         let first_commit = store.get(id).unwrap().unwrap().commit;
@@ -791,10 +725,6 @@ mod tests {
         /// fails against a genuine precondition mismatch on the backend —
         /// simulates a concurrent writer that actually won the race.
         Concurrent(RefEdit),
-        /// Create a ref at whatever name the caller's own edit targets,
-        /// using a placeholder object, before delegating — for when that
-        /// name is not known ahead of time (`create`'s genesis-derived ref).
-        Collide,
         /// Fail immediately with nothing written — contention indistinguishable
         /// from a real race by the caller, but the backend never changes.
         Phantom,
@@ -820,10 +750,6 @@ mod tests {
             self.injections
                 .borrow_mut()
                 .push_back(Injection::Concurrent(edit));
-        }
-
-        fn push_collide(&self) {
-            self.injections.borrow_mut().push_back(Injection::Collide);
         }
 
         fn push_phantom(&self) {
@@ -853,16 +779,6 @@ mod tests {
                         .expect("injected concurrent edit applies cleanly");
                     self.inner.apply(edit)
                 }
-                Some(Injection::Collide) => {
-                    let collide = RefEdit::Create {
-                        name: edit.name().clone(),
-                        new: hex(0xA),
-                    };
-                    self.inner
-                        .apply(collide)
-                        .expect("injected collision applies cleanly");
-                    self.inner.apply(edit)
-                }
                 Some(Injection::Phantom) => Err(ApplyError::LostRace {
                     name: edit.name().clone(),
                     expected: edit.expectation(),
@@ -881,11 +797,16 @@ mod tests {
     }
 
     fn flaky_store() -> Store<FlakyRefStore, ObjectStore> {
-        Store {
-            refs: FlakyRefStore::new(),
-            objects: ObjectStore::default(),
-            prefix: prefix(),
-        }
+        Store::new(FlakyRefStore::new(), ObjectStore::default(), &prefix())
+    }
+
+    /// The ref a note's entity lives at.
+    fn note_ref<R, O>(store: &Store<R, O>, target: ObjectId, id: ObjectId) -> RefName
+    where
+        R: RefStore + Committer,
+        O: Find + Write,
+    {
+        store.notes().reference(&NoteName { target, id }.path())
     }
 
     /// A backend whose author and committer identities differ, as a
@@ -927,34 +848,43 @@ mod tests {
         }
     }
 
+    /// The author and committer names recorded on `commit`.
+    fn identities(objects: &ObjectStore, commit: ObjectId) -> (String, String) {
+        let mut buf = Vec::new();
+        let data = objects.find(&commit, &mut buf).expect("commit present");
+        let commit =
+            gix::objs::CommitRef::from_bytes(data.data, data.object_hash).expect("valid commit");
+        (
+            commit.author().unwrap().name.to_string(),
+            commit.committer().unwrap().name.to_string(),
+        )
+    }
+
     #[test]
     fn a_notes_author_comes_from_the_author_identity_not_the_committer() {
-        let store = Store {
-            refs: SplitIdentity(MemoryRefStore::new()),
-            objects: ObjectStore::default(),
-            prefix: prefix(),
-        };
+        let store = Store::new(
+            SplitIdentity(MemoryRefStore::new()),
+            ObjectStore::default(),
+            &prefix(),
+        );
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"note", None).unwrap();
         let commit = store.history(id).unwrap()[0];
 
-        let (author, committer) = store
-            .with_commit(commit, |c| {
-                Ok((
-                    c.author().unwrap().name.to_string(),
-                    c.committer().unwrap().name.to_string(),
-                ))
-            })
-            .unwrap();
+        let (author, committer) = identities(store.inner.objects(), commit);
         assert_eq!(author, "Author");
         assert_eq!(committer, "Committer");
     }
 
-    /// Writes a note commit directly, bypassing every [`Store`] write
-    /// method — stands in for a concurrent writer's version when scripting
-    /// a [`FlakyRefStore::push_concurrent`] injection.
+    /// Commit a note the way a concurrent writer would — a real, schema-bound
+    /// entity commit parented on `parent` — without going through the ref
+    /// under test, so it can be scripted as a
+    /// [`FlakyRefStore::push_concurrent`] winner.
+    ///
+    /// The scratch name is not a `<target-hex>/<id-hex>` pair, so
+    /// [`Store::list`] and [`Store::find`] never see it.
     fn write_note_commit(
         store: &Store<FlakyRefStore, ObjectStore>,
         binding_id: ObjectId,
@@ -962,6 +892,18 @@ mod tests {
         created_at: u64,
         parent: Option<ObjectId>,
     ) -> ObjectId {
+        let scratch = RefPath::new("scratch/winner").expect("valid entity path");
+        let notes = store.published().expect("publish the notes schema");
+        if let Some(parent) = parent {
+            store
+                .inner
+                .refs()
+                .apply(RefEdit::Create {
+                    name: notes.reference(&scratch),
+                    new: parent,
+                })
+                .expect("scratch ref");
+        }
         let note = Note {
             body: body.to_vec(),
             binding: RawTree::new(binding_id),
@@ -970,9 +912,10 @@ mod tests {
             state: None,
             created_at,
         };
-        let tree = facet_git_tree::serialize_into(&note, &store.objects).expect("serialize note");
-        store
-            .write_commit("concurrent", tree, parent)
+        notes
+            .write(&note)
+            .message("concurrent")
+            .at(&scratch)
             .expect("write concurrent commit")
     }
 
@@ -980,11 +923,11 @@ mod tests {
     fn attach_with_attachment_retries_and_forwards_the_winners_created_at() {
         let store = flaky_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"v1", None).unwrap();
-        let refname = store.note_ref(binding.target(), id);
-        let original_tip = store.refs.read(&refname).unwrap().unwrap();
+        let refname = note_ref(&store, binding.target(), id);
+        let original_tip = store.inner.refs().read(&refname).unwrap().unwrap();
         let original_created_at = store.get(id).unwrap().unwrap().created_at;
 
         let winner_created_at = original_created_at.wrapping_add(1_000_000);
@@ -995,7 +938,7 @@ mod tests {
             winner_created_at,
             Some(original_tip),
         );
-        store.refs.push_concurrent(RefEdit::Update {
+        store.inner.refs().push_concurrent(RefEdit::Update {
             name: refname.clone(),
             expected: original_tip,
             new: winner_commit,
@@ -1023,21 +966,23 @@ mod tests {
     fn update_retries_and_carries_the_winners_binding_and_created_at_forward() {
         let store = flaky_store();
         let original_binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store
             .create(&original_binding, b"a", None, None, None, "a")
             .unwrap();
-        let refname = store.note_ref(original_binding.target(), id);
-        let original_tip = store.refs.read(&refname).unwrap().unwrap();
+        let refname = note_ref(&store, original_binding.target(), id);
+        let original_tip = store.inner.refs().read(&refname).unwrap().unwrap();
 
         // A concurrent writer's version carries a different binding and a
         // distinguishable created_at: `update` must pick both up off the
         // winning tip, not off the value read before the race.
         let winner_binding = Binding::Commit {
-            commit: hex(2).into(),
+            commit: oid_of(2).into(),
         };
-        let winner_binding_id = winner_binding.serialize_into(&store.objects).unwrap();
+        let winner_binding_id = winner_binding
+            .serialize_into(store.inner.objects())
+            .unwrap();
         let winner_created_at = 123_456_789;
         let winner_commit = write_note_commit(
             &store,
@@ -1046,7 +991,7 @@ mod tests {
             winner_created_at,
             Some(original_tip),
         );
-        store.refs.push_concurrent(RefEdit::Update {
+        store.inner.refs().push_concurrent(RefEdit::Update {
             name: refname.clone(),
             expected: original_tip,
             new: winner_commit,
@@ -1069,14 +1014,14 @@ mod tests {
     fn remove_retries_and_deletes_the_winning_tip() {
         let store = flaky_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
         let id = store.attach(&binding, b"v1", None).unwrap();
-        let refname = store.note_ref(binding.target(), id);
-        let original_tip = store.refs.read(&refname).unwrap().unwrap();
+        let refname = note_ref(&store, binding.target(), id);
+        let original_tip = store.inner.refs().read(&refname).unwrap().unwrap();
 
         let winner_commit = write_note_commit(&store, id, b"concurrent", 42, Some(original_tip));
-        store.refs.push_concurrent(RefEdit::Update {
+        store.inner.refs().push_concurrent(RefEdit::Update {
             name: refname.clone(),
             expected: original_tip,
             new: winner_commit,
@@ -1084,30 +1029,16 @@ mod tests {
 
         assert!(store.remove(id).unwrap());
         assert!(store.get(id).unwrap().is_none());
-        assert!(store.refs.read(&refname).unwrap().is_none());
-    }
-
-    #[test]
-    fn create_returns_genesis_exists_when_the_ref_is_present_after_a_lost_race() {
-        let store = flaky_store();
-        let binding = Binding::Commit {
-            commit: hex(1).into(),
-        };
-        store.refs.push_collide();
-
-        let err = store
-            .create(&binding, b"body", None, None, None, "msg")
-            .unwrap_err();
-        assert!(matches!(err, Error::GenesisExists(_)));
+        assert!(store.inner.refs().read(&refname).unwrap().is_none());
     }
 
     #[test]
     fn create_retries_to_success_on_pure_contention() {
         let store = flaky_store();
         let binding = Binding::Commit {
-            commit: hex(1).into(),
+            commit: oid_of(1).into(),
         };
-        store.refs.push_phantom();
+        store.inner.refs().push_phantom();
 
         let id = store
             .create(&binding, b"body", None, None, None, "msg")

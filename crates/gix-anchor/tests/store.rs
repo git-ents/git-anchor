@@ -244,7 +244,7 @@ fn attachment_round_trips_and_stays_reachable() {
     assert_eq!(store.get(plain).unwrap().unwrap().attachment, None);
 
     // The attachment tree is reachable from the note's own committed tree.
-    let refname = format!("refs/anchors/{}/{}", binding.target(), id);
+    let refname = format!("refs/anchors/data/notes/{}/{}", binding.target(), id);
     let tree = repo
         .find_reference(&refname)
         .unwrap()
@@ -372,7 +372,10 @@ fn with_prefix_roots_a_separate_namespace() {
     );
 
     let reference = repo
-        .find_reference(&format!("refs/comments/{}/{comment_id}", binding.target()))
+        .find_reference(&format!(
+            "refs/comments/data/notes/{}/{comment_id}",
+            binding.target()
+        ))
         .expect("comment ref exists under the custom prefix");
     drop(reference);
 }
@@ -402,7 +405,7 @@ fn anchored_content_is_reachable_from_the_notes_own_tree() {
 
     let id = store.attach(&binding, b"reachability check", None).unwrap();
 
-    let refname = format!("refs/anchors/{}/{}", binding.target(), id);
+    let refname = format!("refs/anchors/data/notes/{}/{}", binding.target(), id);
     let reference = repo.find_reference(&refname).expect("note ref exists");
     let commit = reference
         .into_fully_peeled_id()

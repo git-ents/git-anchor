@@ -62,11 +62,6 @@ pub enum Error {
     /// `gix` object store the codec was given.
     #[error(transparent)]
     Deserialize(#[from] facet_git_tree::DeserializeError),
-    /// [`crate::Store::create`] minted a genesis commit whose oid already
-    /// names an existing note ref — an identity collision rather than a
-    /// transient compare-and-swap race, so retrying would spin forever.
-    #[error("genesis commit {0} already has a note ref")]
-    GenesisExists(gix::ObjectId),
     /// Any underlying failure from [`crate::Store`]'s ref-store, committer,
     /// or object-database backend, collapsed to a single variant with the
     /// original error preserved as its source.
@@ -81,6 +76,12 @@ impl Error {
         E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
     {
         Error::Git(err.into())
+    }
+}
+
+impl From<gix_store::Error> for Error {
+    fn from(err: gix_store::Error) -> Self {
+        Error::git(err)
     }
 }
 
