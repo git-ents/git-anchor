@@ -41,7 +41,7 @@
 //! let comments = Comments::open(&repo);
 //!
 //! let head = repo.head_id().expect("head").detach();
-//! let id = comments.add(&Binding::Commit { commit: head }, "ship it", None).expect("add");
+//! let id = comments.add(&Binding::Commit { commit: head.into() }, "ship it", None).expect("add");
 //!
 //! let comment = comments.get(id).expect("get").expect("exists");
 //! assert_eq!(comment.message, "ship it");

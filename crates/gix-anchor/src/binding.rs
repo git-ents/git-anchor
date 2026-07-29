@@ -15,22 +15,38 @@
 //! witness is provenance, not identity: [`Binding::same_target`] ignores it
 //! entirely.
 //!
-//! `Binding` itself is a plain Rust enum, not a `facet::Facet` type — the
-//! generic derive would encode an enum externally tagged (a tree with one
-//! variant-named entry), which would not round-trip the existing anchor
-//! storage format byte for byte. Instead [`Binding::serialize_into`] and
-//! [`Binding::deserialize`] hand-encode each variant as a *bare* tree (no
-//! variant tag), inferring the variant back from which entry names are
-//! present on read.
+//! `Binding` derives `facet::Facet`, so [`Binding::serialize_into`] and
+//! [`Binding::deserialize`] round-trip it through `facet-git-tree`'s
+//! externally-tagged enum encoding directly.
 
 use facet::Facet;
 use gix::ObjectId;
-use gix_object::{Find, Kind, TreeRef, Write};
+use gix_object::{Find, Write};
 
 use crate::anchor::Anchor;
 use crate::error::{Error, Result};
 use crate::projection::{Projection, project};
 use crate::util::resolve_commit;
+
+/// A 20-byte object id, wrapped so it can derive [`Facet`] — [`ObjectId`]
+/// itself is defined outside this crate and cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[facet(transparent)]
+pub struct Oid([u8; 20]);
+
+impl From<ObjectId> for Oid {
+    fn from(id: ObjectId) -> Self {
+        let mut bytes = [0u8; 20];
+        bytes.copy_from_slice(id.as_slice());
+        Self(bytes)
+    }
+}
+
+impl From<Oid> for ObjectId {
+    fn from(oid: Oid) -> Self {
+        ObjectId::from_bytes_or_panic(&oid.0)
+    }
+}
 
 /// The single typed-reference vocabulary into the object graph: what a
 /// claim, comment, or review is *about*.
@@ -41,16 +57,17 @@ use crate::util::resolve_commit;
 /// use gix_anchor::Binding;
 ///
 /// let commit = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
-/// let binding = Binding::Commit { commit };
+/// let binding = Binding::Commit { commit: commit.into() };
 /// assert_eq!(binding.witnesses(), vec![commit]);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[repr(u8)]
 pub enum Binding {
     /// History-bound: the commit itself is the target. Its own witness is
     /// itself.
     Commit {
         /// The commit named by this binding.
-        commit: ObjectId,
+        commit: Oid,
     },
     /// Content-bound: a tree, independent of any particular commit or
     /// path. `path` is advisory metadata only — identity is `tree` alone,
@@ -59,12 +76,12 @@ pub enum Binding {
     /// bound.
     Tree {
         /// The bound tree's identity.
-        tree: ObjectId,
+        tree: Oid,
         /// Where `tree` was found when this binding was made, retained for
         /// display only — never part of identity.
         path: String,
         /// A commit whose ancestry reaches `tree`.
-        witness: ObjectId,
+        witness: Oid,
     },
     /// Transformation-bound: the pair `(base_tree, head_tree)` — an edit,
     /// not either endpoint alone. A commit range is *evidence for* a
@@ -72,16 +89,16 @@ pub enum Binding {
     /// [`Binding::Tree`]'s.
     Delta {
         /// The tree before the transformation.
-        base_tree: ObjectId,
+        base_tree: Oid,
         /// The tree after the transformation.
-        head_tree: ObjectId,
+        head_tree: Oid,
         /// Where the transformation was found when this binding was made,
         /// retained for display only — never part of identity.
         path: String,
         /// A commit whose ancestry reaches `base_tree`.
-        base_witness: ObjectId,
+        base_witness: Oid,
         /// A commit whose ancestry reaches `head_tree`.
-        head_witness: ObjectId,
+        head_witness: Oid,
     },
     /// Position-bound: [`Anchor`] verbatim — a durable pointer to specific
     /// lines (or a whole file) at a specific blob, retained and
@@ -91,52 +108,10 @@ pub enum Binding {
     /// distinct from either [`Binding::Commit`] or [`Binding::Tree`] alone.
     Hybrid {
         /// The parent commit.
-        commit: ObjectId,
+        commit: Oid,
         /// The body tree.
-        tree: ObjectId,
+        tree: Oid,
     },
-}
-
-/// `[u8; 20]` payload for [`Binding::Commit`], encoded bare (no variant
-/// tag) so [`Binding::serialize_into`] reproduces the exact byte layout
-/// [`Binding::deserialize`] sniffs on.
-#[derive(Debug, Clone, Facet)]
-struct CommitPayload {
-    commit: [u8; 20],
-}
-
-/// `[u8; 20]`/`String` payload for [`Binding::Tree`], encoded bare.
-#[derive(Debug, Clone, Facet)]
-struct TreePayload {
-    tree: [u8; 20],
-    path: String,
-    witness: [u8; 20],
-}
-
-/// `[u8; 20]`/`String` payload for [`Binding::Delta`], encoded bare.
-#[derive(Debug, Clone, Facet)]
-struct DeltaPayload {
-    base_tree: [u8; 20],
-    head_tree: [u8; 20],
-    path: String,
-    base_witness: [u8; 20],
-    head_witness: [u8; 20],
-}
-
-/// `[u8; 20]` payload for [`Binding::Hybrid`], encoded bare.
-#[derive(Debug, Clone, Facet)]
-struct HybridPayload {
-    commit: [u8; 20],
-    tree: [u8; 20],
-}
-
-/// `id`'s raw 20 bytes, for embedding in a `Facet`-derived payload struct —
-/// [`Anchor`]'s own `commit`/`blob` pattern, applied to every oid field a
-/// [`Binding`] variant carries.
-fn oid_bytes(id: ObjectId) -> [u8; 20] {
-    let mut bytes = [0u8; 20];
-    bytes.copy_from_slice(id.as_slice());
-    bytes
 }
 
 impl Binding {
@@ -154,24 +129,24 @@ impl Binding {
     /// let base_witness = gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
     /// let head_witness = gix::ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
     /// let binding = Binding::Delta {
-    ///     base_tree: gix::ObjectId::from_hex(b"3333333333333333333333333333333333333333").unwrap(),
-    ///     head_tree: gix::ObjectId::from_hex(b"4444444444444444444444444444444444444444").unwrap(),
+    ///     base_tree: gix::ObjectId::from_hex(b"3333333333333333333333333333333333333333").unwrap().into(),
+    ///     head_tree: gix::ObjectId::from_hex(b"4444444444444444444444444444444444444444").unwrap().into(),
     ///     path: "src/lib.rs".to_owned(),
-    ///     base_witness,
-    ///     head_witness,
+    ///     base_witness: base_witness.into(),
+    ///     head_witness: head_witness.into(),
     /// };
     /// assert_eq!(binding.witnesses(), vec![base_witness, head_witness]);
     /// ```
     #[must_use]
     pub fn witnesses(&self) -> Vec<ObjectId> {
         match self {
-            Self::Commit { commit } | Self::Hybrid { commit, .. } => vec![*commit],
-            Self::Tree { witness, .. } => vec![*witness],
+            Self::Commit { commit } | Self::Hybrid { commit, .. } => vec![ObjectId::from(*commit)],
+            Self::Tree { witness, .. } => vec![ObjectId::from(*witness)],
             Self::Delta {
                 base_witness,
                 head_witness,
                 ..
-            } => vec![*base_witness, *head_witness],
+            } => vec![ObjectId::from(*base_witness), ObjectId::from(*head_witness)],
             Self::Position(anchor) => vec![anchor.commit()],
         }
     }
@@ -188,15 +163,15 @@ impl Binding {
     /// use gix_anchor::Binding;
     ///
     /// let commit = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
-    /// let binding = Binding::Commit { commit };
+    /// let binding = Binding::Commit { commit: commit.into() };
     /// assert_eq!(binding.target(), commit);
     /// ```
     #[must_use]
     pub fn target(&self) -> ObjectId {
         match self {
-            Self::Commit { commit } | Self::Hybrid { commit, .. } => *commit,
-            Self::Tree { tree, .. } => *tree,
-            Self::Delta { head_tree, .. } => *head_tree,
+            Self::Commit { commit } | Self::Hybrid { commit, .. } => ObjectId::from(*commit),
+            Self::Tree { tree, .. } => ObjectId::from(*tree),
+            Self::Delta { head_tree, .. } => ObjectId::from(*head_tree),
             Self::Position(anchor) => anchor.blob(),
         }
     }
@@ -220,14 +195,14 @@ impl Binding {
     ///
     /// let tree = gix::ObjectId::from_hex(b"5555555555555555555555555555555555555555").unwrap();
     /// let a = Binding::Tree {
-    ///     tree,
+    ///     tree: tree.into(),
     ///     path: "a.rs".to_owned(),
-    ///     witness: gix::ObjectId::from_hex(b"6666666666666666666666666666666666666666").unwrap(),
+    ///     witness: gix::ObjectId::from_hex(b"6666666666666666666666666666666666666666").unwrap().into(),
     /// };
     /// let b = Binding::Tree {
-    ///     tree,
+    ///     tree: tree.into(),
     ///     path: "b.rs".to_owned(),
-    ///     witness: gix::ObjectId::from_hex(b"7777777777777777777777777777777777777777").unwrap(),
+    ///     witness: gix::ObjectId::from_hex(b"7777777777777777777777777777777777777777").unwrap().into(),
     /// };
     /// assert_ne!(a, b, "different path and witness: not structurally equal");
     /// assert!(a.same_target(&b), "same tree oid: same target regardless of path/witness");
@@ -266,14 +241,8 @@ impl Binding {
         }
     }
 
-    /// Write `self` into `store` as a *bare* tree — no variant tag —
-    /// keyed by the variant's own field names: [`Binding::Position`]
-    /// writes exactly what [`facet_git_tree::serialize_into`] has always
-    /// written for an [`Anchor`] (the existing stored format, unchanged
-    /// byte for byte); every other variant writes its payload struct's
-    /// fields the same way. [`Binding::deserialize`] recovers the variant
-    /// by sniffing which entry names are present, since no discriminant is
-    /// stored.
+    /// Write `self` into `store` as an externally-tagged
+    /// [`facet_git_tree`]-encoded tree.
     ///
     /// `store` takes the same bound `facet_git_tree::serialize_into` does:
     /// any `gix` object-write sink — a real repository's object database,
@@ -288,7 +257,7 @@ impl Binding {
     ///
     /// let store = ObjectStore::default();
     /// let binding = Binding::Commit {
-    ///     commit: gix::ObjectId::from_hex(b"8888888888888888888888888888888888888888").unwrap(),
+    ///     commit: gix::ObjectId::from_hex(b"8888888888888888888888888888888888888888").unwrap().into(),
     /// };
     /// let root = binding.serialize_into(&store).expect("serialize");
     /// let back = Binding::deserialize(&root, &store).expect("deserialize");
@@ -303,144 +272,23 @@ impl Binding {
     where
         W: Write + ?Sized,
     {
-        match self {
-            Self::Commit { commit } => {
-                let payload = CommitPayload {
-                    commit: oid_bytes(*commit),
-                };
-                Ok(facet_git_tree::serialize_into(&payload, store)?)
-            }
-            Self::Tree {
-                tree,
-                path,
-                witness,
-            } => {
-                let payload = TreePayload {
-                    tree: oid_bytes(*tree),
-                    path: path.clone(),
-                    witness: oid_bytes(*witness),
-                };
-                Ok(facet_git_tree::serialize_into(&payload, store)?)
-            }
-            Self::Delta {
-                base_tree,
-                head_tree,
-                path,
-                base_witness,
-                head_witness,
-            } => {
-                let payload = DeltaPayload {
-                    base_tree: oid_bytes(*base_tree),
-                    head_tree: oid_bytes(*head_tree),
-                    path: path.clone(),
-                    base_witness: oid_bytes(*base_witness),
-                    head_witness: oid_bytes(*head_witness),
-                };
-                Ok(facet_git_tree::serialize_into(&payload, store)?)
-            }
-            Self::Position(anchor) => Ok(facet_git_tree::serialize_into(anchor, store)?),
-            Self::Hybrid { commit, tree } => {
-                let payload = HybridPayload {
-                    commit: oid_bytes(*commit),
-                    tree: oid_bytes(*tree),
-                };
-                Ok(facet_git_tree::serialize_into(&payload, store)?)
-            }
-        }
+        Ok(facet_git_tree::serialize_into(self, store)?)
     }
 
-    /// Read the [`Binding`] stored bare (no variant tag) at `id` in
-    /// `store`, inferring the variant from which entry names the tree
-    /// holds: `blob`+`content` → [`Binding::Position`] (decoded as
-    /// [`Anchor`]); `base_tree` → [`Binding::Delta`]; `witness` (with
-    /// `tree`) → [`Binding::Tree`]; exactly `{commit, tree}` →
-    /// [`Binding::Hybrid`]; exactly `{commit}` → [`Binding::Commit`].
+    /// Read the [`Binding`] stored at `id` in `store`.
     ///
     /// `store` takes the same bound `facet_git_tree::deserialize` does:
     /// any `gix` object-read source.
     ///
     /// # Errors
     ///
-    /// [`Error::Deserialize`] when the recognized shape fails to decode;
-    /// [`Error::UnknownBindingShape`] when the entry names match none of
-    /// the five shapes; [`Error::Object`] when `id` cannot be read as a
-    /// tree at all.
+    /// [`Error::Deserialize`] when `id` does not decode as a [`Binding`].
     pub fn deserialize<F>(id: &ObjectId, store: &F) -> Result<Self>
     where
         F: Find + ?Sized,
     {
-        let entries = tree_entries(id, store)?;
-        let names: std::collections::BTreeSet<&str> =
-            entries.iter().map(|(name, _)| name.as_str()).collect();
-
-        if names.contains("blob") && names.contains("content") {
-            let anchor: Anchor = facet_git_tree::deserialize(id, store)?;
-            return Ok(Self::Position(anchor));
-        }
-        if names.contains("base_tree") {
-            let payload: DeltaPayload = facet_git_tree::deserialize(id, store)?;
-            return Ok(Self::Delta {
-                base_tree: ObjectId::from_bytes_or_panic(&payload.base_tree),
-                head_tree: ObjectId::from_bytes_or_panic(&payload.head_tree),
-                path: payload.path,
-                base_witness: ObjectId::from_bytes_or_panic(&payload.base_witness),
-                head_witness: ObjectId::from_bytes_or_panic(&payload.head_witness),
-            });
-        }
-        if names.contains("witness") && names.contains("tree") {
-            let payload: TreePayload = facet_git_tree::deserialize(id, store)?;
-            return Ok(Self::Tree {
-                tree: ObjectId::from_bytes_or_panic(&payload.tree),
-                path: payload.path,
-                witness: ObjectId::from_bytes_or_panic(&payload.witness),
-            });
-        }
-        if names.len() == 2 && names.contains("commit") && names.contains("tree") {
-            let payload: HybridPayload = facet_git_tree::deserialize(id, store)?;
-            return Ok(Self::Hybrid {
-                commit: ObjectId::from_bytes_or_panic(&payload.commit),
-                tree: ObjectId::from_bytes_or_panic(&payload.tree),
-            });
-        }
-        if names.len() == 1 && names.contains("commit") {
-            let payload: CommitPayload = facet_git_tree::deserialize(id, store)?;
-            return Ok(Self::Commit {
-                commit: ObjectId::from_bytes_or_panic(&payload.commit),
-            });
-        }
-
-        Err(Error::UnknownBindingShape {
-            id: *id,
-            entries: entries.into_iter().map(|(name, _)| name).collect(),
-        })
+        Ok(facet_git_tree::deserialize(id, store)?)
     }
-}
-
-/// The name and object id of every entry directly under the tree at `id` —
-/// this crate's own copy of `facet-git-tree`'s private `find_tree_entries`,
-/// needed because [`Binding::deserialize`] must inspect entry names *before*
-/// it knows which `Facet` type to hand `facet_git_tree::deserialize`.
-fn tree_entries<F>(id: &ObjectId, store: &F) -> Result<Vec<(String, ObjectId)>>
-where
-    F: Find + ?Sized,
-{
-    let mut buf = Vec::new();
-    let data = store
-        .try_find(id, &mut buf)
-        .map_err(|error| Error::Object(error.to_string()))?
-        .ok_or_else(|| Error::Object(format!("object {id} not found")))?;
-    if data.kind != Kind::Tree {
-        return Err(Error::Object(format!("object {id} is not a tree")));
-    }
-    let tree_ref = TreeRef::from_bytes(data.data, data.object_hash)
-        .map_err(|error| Error::Object(error.to_string()))?;
-    let mut out = Vec::with_capacity(tree_ref.entries.len());
-    for entry in &tree_ref.entries {
-        let name = std::str::from_utf8(entry.filename)
-            .map_err(|_error| Error::Object("tree entry name is not valid UTF-8".to_owned()))?;
-        out.push((name.to_owned(), entry.oid.to_owned()));
-    }
-    Ok(out)
 }
 
 /// How up to date a [`Binding`] is as of the revision [`EvalState`]
@@ -531,7 +379,7 @@ pub struct EvalState<'a> {
 /// #     .status().unwrap();
 /// let repo = gix::open(dir.path()).expect("open");
 /// let commit = repo.head_id().expect("head").detach();
-/// let binding = Binding::Commit { commit };
+/// let binding = Binding::Commit { commit: commit.into() };
 /// let state = EvalState { at: "HEAD", delta: None };
 /// assert_eq!(gix_anchor::revalidate(&repo, &binding, &state).unwrap(), Validity::Valid);
 /// ```
@@ -541,17 +389,23 @@ pub fn revalidate(
     state: &EvalState<'_>,
 ) -> Result<Validity> {
     match binding {
-        Binding::Commit { commit } => Ok(commit_validity(repo, *commit, state.at)),
-        Binding::Tree { tree, path, .. } => tree_validity(repo, *tree, path, state.at),
+        Binding::Commit { commit } => Ok(commit_validity(repo, ObjectId::from(*commit), state.at)),
+        Binding::Tree { tree, path, .. } => {
+            tree_validity(repo, ObjectId::from(*tree), path, state.at)
+        }
         Binding::Delta {
             base_tree,
             head_tree,
             ..
-        } => Ok(delta_validity(*base_tree, *head_tree, state.delta)),
+        } => Ok(delta_validity(
+            ObjectId::from(*base_tree),
+            ObjectId::from(*head_tree),
+            state.delta,
+        )),
         Binding::Position(anchor) => position_validity(repo, anchor, state.at),
         Binding::Hybrid { commit, tree } => {
-            let commit_v = commit_validity(repo, *commit, state.at);
-            let tree_v = tree_reachable(repo, *tree, state.at)?;
+            let commit_v = commit_validity(repo, ObjectId::from(*commit), state.at);
+            let tree_v = tree_reachable(repo, ObjectId::from(*tree), state.at)?;
             Ok(combine(commit_v, tree_v))
         }
     }
@@ -719,30 +573,32 @@ mod tests {
 
     fn sample_tree() -> Binding {
         Binding::Tree {
-            tree: hex(1),
+            tree: hex(1).into(),
             path: "src/lib.rs".to_owned(),
-            witness: hex(2),
+            witness: hex(2).into(),
         }
     }
 
     fn sample_delta() -> Binding {
         Binding::Delta {
-            base_tree: hex(3),
-            head_tree: hex(4),
+            base_tree: hex(3).into(),
+            head_tree: hex(4).into(),
             path: "src/lib.rs".to_owned(),
-            base_witness: hex(5),
-            head_witness: hex(6),
+            base_witness: hex(5).into(),
+            head_witness: hex(6).into(),
         }
     }
 
     fn sample_commit() -> Binding {
-        Binding::Commit { commit: hex(7) }
+        Binding::Commit {
+            commit: hex(7).into(),
+        }
     }
 
     fn sample_hybrid() -> Binding {
         Binding::Hybrid {
-            commit: hex(8),
-            tree: hex(9),
+            commit: hex(8).into(),
+            tree: hex(9).into(),
         }
     }
 
@@ -769,11 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn sniffing_rejects_an_unknown_entry_set() {
+    fn deserialize_rejects_a_tree_that_is_not_a_tagged_variant() {
         let store = ObjectStore::default();
         let root = gix_object::Write::write(&store, &gix_object::Tree { entries: vec![] }).unwrap();
         let error = Binding::deserialize(&root, &store).unwrap_err();
-        assert!(matches!(error, Error::UnknownBindingShape { .. }));
+        assert!(matches!(error, Error::Deserialize(_)));
     }
 
     #[rstest]
@@ -801,14 +657,14 @@ mod tests {
     #[test]
     fn same_target_ignores_path_and_witness_for_tree() {
         let a = Binding::Tree {
-            tree: hex(1),
+            tree: hex(1).into(),
             path: "a.rs".to_owned(),
-            witness: hex(2),
+            witness: hex(2).into(),
         };
         let b = Binding::Tree {
-            tree: hex(1),
+            tree: hex(1).into(),
             path: "b.rs".to_owned(),
-            witness: hex(9),
+            witness: hex(9).into(),
         };
         assert_ne!(a, b);
         assert!(a.same_target(&b));
@@ -817,18 +673,18 @@ mod tests {
     #[test]
     fn same_target_ignores_path_and_witnesses_for_delta() {
         let a = Binding::Delta {
-            base_tree: hex(3),
-            head_tree: hex(4),
+            base_tree: hex(3).into(),
+            head_tree: hex(4).into(),
             path: "a.rs".to_owned(),
-            base_witness: hex(5),
-            head_witness: hex(6),
+            base_witness: hex(5).into(),
+            head_witness: hex(6).into(),
         };
         let b = Binding::Delta {
-            base_tree: hex(3),
-            head_tree: hex(4),
+            base_tree: hex(3).into(),
+            head_tree: hex(4).into(),
             path: "b.rs".to_owned(),
-            base_witness: hex(1),
-            head_witness: hex(2),
+            base_witness: hex(1).into(),
+            head_witness: hex(2).into(),
         };
         assert_ne!(a, b);
         assert!(a.same_target(&b));
@@ -836,10 +692,12 @@ mod tests {
 
     #[test]
     fn same_target_distinguishes_different_variants_naming_overlapping_objects() {
-        let commit = Binding::Commit { commit: hex(1) };
+        let commit = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let hybrid = Binding::Hybrid {
-            commit: hex(1),
-            tree: hex(2),
+            commit: hex(1).into(),
+            tree: hex(2).into(),
         };
         assert!(!commit.same_target(&hybrid));
     }
@@ -893,11 +751,25 @@ mod tests {
             delta: None,
         };
         assert_eq!(
-            revalidate(&git_repo, &Binding::Commit { commit: second }, &state).unwrap(),
+            revalidate(
+                &git_repo,
+                &Binding::Commit {
+                    commit: second.into()
+                },
+                &state
+            )
+            .unwrap(),
             Validity::Valid
         );
         assert_eq!(
-            revalidate(&git_repo, &Binding::Commit { commit: first }, &state).unwrap(),
+            revalidate(
+                &git_repo,
+                &Binding::Commit {
+                    commit: first.into()
+                },
+                &state
+            )
+            .unwrap(),
             Validity::Valid,
             "an ancestor of the revision under evaluation is still valid"
         );
@@ -925,7 +797,9 @@ mod tests {
         assert_eq!(
             revalidate(
                 &git_repo,
-                &Binding::Commit { commit: unrelated },
+                &Binding::Commit {
+                    commit: unrelated.into()
+                },
                 &state_at_second
             )
             .unwrap(),
@@ -941,7 +815,9 @@ mod tests {
         let git_repo = gix::open(dir.path()).unwrap();
 
         let missing = Binding::Commit {
-            commit: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap(),
+            commit: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567")
+                .unwrap()
+                .into(),
         };
         let state = EvalState {
             at: "HEAD",
@@ -953,7 +829,7 @@ mod tests {
         );
 
         let head = Binding::Commit {
-            commit: git_repo.head_id().unwrap().detach(),
+            commit: git_repo.head_id().unwrap().detach().into(),
         };
         let unresolvable = EvalState {
             at: "not-a-revision",
@@ -987,9 +863,9 @@ mod tests {
 
         // Fast path: recorded at its real path.
         let at_path = Binding::Tree {
-            tree: sub_tree,
+            tree: sub_tree.into(),
             path: "sub".to_owned(),
-            witness: commit,
+            witness: commit.into(),
         };
         assert_eq!(
             revalidate(&git_repo, &at_path, &state).unwrap(),
@@ -999,9 +875,9 @@ mod tests {
         // Anywhere fallback: recorded at a wrong path, but the same tree
         // still sits somewhere in the target's tree.
         let wrong_path = Binding::Tree {
-            tree: sub_tree,
+            tree: sub_tree.into(),
             path: "not/the/real/path".to_owned(),
-            witness: commit,
+            witness: commit.into(),
         };
         assert_eq!(
             revalidate(&git_repo, &wrong_path, &state).unwrap(),
@@ -1009,9 +885,11 @@ mod tests {
         );
 
         let missing = Binding::Tree {
-            tree: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap(),
+            tree: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567")
+                .unwrap()
+                .into(),
             path: "sub".to_owned(),
-            witness: commit,
+            witness: commit.into(),
         };
         assert_eq!(
             revalidate(&git_repo, &missing, &state).unwrap(),
@@ -1134,15 +1012,20 @@ mod tests {
             at: "HEAD",
             delta: None,
         };
-        let valid = Binding::Hybrid { commit, tree };
+        let valid = Binding::Hybrid {
+            commit: commit.into(),
+            tree: tree.into(),
+        };
         assert_eq!(
             revalidate(&git_repo, &valid, &state).unwrap(),
             Validity::Valid
         );
 
         let stale_tree = Binding::Hybrid {
-            commit,
-            tree: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap(),
+            commit: commit.into(),
+            tree: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567")
+                .unwrap()
+                .into(),
         };
         assert_eq!(
             revalidate(&git_repo, &stale_tree, &state).unwrap(),
@@ -1150,8 +1033,10 @@ mod tests {
         );
 
         let unknown_commit = Binding::Hybrid {
-            commit: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap(),
-            tree,
+            commit: gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567")
+                .unwrap()
+                .into(),
+            tree: tree.into(),
         };
         assert_eq!(
             revalidate(&git_repo, &unknown_commit, &state).unwrap(),

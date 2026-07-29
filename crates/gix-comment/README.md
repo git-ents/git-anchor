@@ -21,7 +21,7 @@ let comments = Comments::open(&repo);
 
 // Comment on the current commit.
 let head = repo.head_id()?.detach();
-let id = comments.add(&Binding::Commit { commit: head }, "ship it", None)?;
+let id = comments.add(&Binding::Commit { commit: head.into() }, "ship it", None)?;
 
 // Read it back — the author is whoever git recorded on the storage commit.
 let comment = comments.get(id)?.expect("exists");

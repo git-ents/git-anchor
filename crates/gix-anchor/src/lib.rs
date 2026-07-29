@@ -110,7 +110,7 @@ mod store;
 mod util;
 
 pub use anchor::{Anchor, LineRange, capture, capture_worktree, snippet};
-pub use binding::{Binding, EvalState, Validity, revalidate};
+pub use binding::{Binding, EvalState, Oid, Validity, revalidate};
 pub use diff::{TreeChange, diff_trees};
 pub use error::{Error, Result};
 pub use gix_refstore::RefPrefix;

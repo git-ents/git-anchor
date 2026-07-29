@@ -246,7 +246,9 @@ fn cmd_add(repo: &gix::Repository, store: &RepoStore<'_>, args: AddArgs) -> Resu
                         msg
                     })?
                     .detach();
-                Binding::Commit { commit }
+                Binding::Commit {
+                    commit: commit.into(),
+                }
             }
         }
     };

@@ -368,7 +368,9 @@ fn cmd_add(repo: &gix::Repository, comments: &Comments<'_>, args: AddArgs) -> Re
                         msg
                     })?
                     .detach();
-                Binding::Commit { commit }
+                Binding::Commit {
+                    commit: commit.into(),
+                }
             }
         }
     };

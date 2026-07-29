@@ -1,8 +1,7 @@
 //! Round-trip fixture for [`Binding::deserialize`]/[`Binding::serialize_into`]
-//! against the *existing* stored anchor format, captured from the current
-//! code before this phase's changes: a byte-for-byte guarantee that
-//! `Binding::Position` decodes, and re-encodes, the exact tree
-//! `facet_git_tree::serialize_into(&anchor, ...)` has always produced.
+//! against the stored `Binding::Position` format: an externally-tagged
+//! `facet-git-tree` enum tree — a single `"Position"` entry whose oid is the
+//! anchor's own tree, unchanged.
 //!
 //! Every oid below is content-addressed from the bytes reconstructed in
 //! this file, so a single corrupted byte in any hex constant — or in the
@@ -21,9 +20,15 @@ use gix_anchor::{Binding, LineRange};
 use gix_object::tree::{Entry, EntryKind, EntryMode};
 use gix_object::{Kind, Tree, Write as _};
 
-/// The root tree's oid, exactly as the current code produces it for an
-/// anchor at `file.txt`, lines 3..=4, in a 10-line numbered file.
-const ROOT: &str = "0a3871b5ab7a4c1cbb6c97a0344747ef86d954ca";
+/// The tagged `Binding::Position` root tree's oid: a single `"Position"`
+/// entry pointing at [`ANCHOR_ROOT`].
+const ROOT: &str = "d7e04588b2593750d2c9da4d0eb767776ace8a34";
+
+/// The anchor's own tree oid, exactly as the current code produces it for
+/// an anchor at `file.txt`, lines 3..=4, in a 10-line numbered file — the
+/// same tree [`ROOT`]'s `"Position"` entry points to, since a single-field
+/// tuple variant resolves directly to its field's own encoding.
+const ANCHOR_ROOT: &str = "0a3871b5ab7a4c1cbb6c97a0344747ef86d954ca";
 
 /// `blob` entry: [`gix_anchor::Anchor::blob`]'s 20 raw bytes, embedded —
 /// equal to `CONTENT_OID`'s own bytes, by content addressing
@@ -121,7 +126,7 @@ fn build_fixture() -> (gix::ObjectId, ObjectStore) {
     let path = write_blob(&store, b"file.txt\n");
     assert_eq!(path.to_string(), PATH_OID);
 
-    let root = write_tree(
+    let anchor_root = write_tree(
         &store,
         vec![
             entry("blob", EntryKind::Blob, blob_entry),
@@ -131,6 +136,12 @@ fn build_fixture() -> (gix::ObjectId, ObjectStore) {
             entry("lines", EntryKind::Tree, lines),
             entry("path", EntryKind::Blob, path),
         ],
+    );
+    assert_eq!(anchor_root.to_string(), ANCHOR_ROOT);
+
+    let root = write_tree(
+        &store,
+        vec![entry("Position", EntryKind::Tree, anchor_root)],
     );
     (root, store)
 }

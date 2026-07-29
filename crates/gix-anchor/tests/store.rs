@@ -77,7 +77,9 @@ fn attach_to_a_commit_binding_with_a_custom_message() {
     let store = Store::open(&repo);
 
     let commit = head_commit(&repo);
-    let binding = Binding::Commit { commit };
+    let binding = Binding::Commit {
+        commit: commit.into(),
+    };
 
     let id = store.attach(&binding, b"looks good", Some("lgtm")).unwrap();
     let note = store.get(id).unwrap().expect("note exists");
@@ -108,7 +110,9 @@ fn list_filters_by_target() {
     let store = Store::open(&repo);
 
     let commit = head_commit(&repo);
-    let commit_binding = Binding::Commit { commit };
+    let commit_binding = Binding::Commit {
+        commit: commit.into(),
+    };
     let anchor_binding =
         Binding::Position(gix_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap());
 
@@ -149,7 +153,9 @@ fn reattach_records_history_on_the_same_note() {
     let store = Store::open(&repo);
 
     let commit = head_commit(&repo);
-    let binding = Binding::Commit { commit };
+    let binding = Binding::Commit {
+        commit: commit.into(),
+    };
 
     let id1 = store.attach(&binding, b"first version", None).unwrap();
     let id2 = store.attach(&binding, b"second version", None).unwrap();
@@ -184,7 +190,9 @@ fn remove_deletes_the_note_and_reports_whether_it_existed() {
     let store = Store::open(&repo);
 
     let commit = head_commit(&repo);
-    let binding = Binding::Commit { commit };
+    let binding = Binding::Commit {
+        commit: commit.into(),
+    };
     let id = store.attach(&binding, b"note body", None).unwrap();
 
     assert!(store.remove(id).unwrap());
@@ -204,7 +212,9 @@ fn attachment_round_trips_and_stays_reachable() {
     let store = Store::open(&repo);
 
     let commit = head_commit(&repo);
-    let binding = Binding::Commit { commit };
+    let binding = Binding::Commit {
+        commit: commit.into(),
+    };
 
     // Use HEAD's own tree as an arbitrary "raw tree" attachment.
     let attach_tree = repo
@@ -272,7 +282,9 @@ fn create_mints_distinct_ids_and_update_versions_one_forward_by_id() {
     let store = Store::open(&repo);
 
     let commit = head_commit(&repo);
-    let binding = Binding::Commit { commit };
+    let binding = Binding::Commit {
+        commit: commit.into(),
+    };
 
     let first = store
         .create(&binding, b"first note", None, None, None, "first")
@@ -339,7 +351,9 @@ fn with_prefix_roots_a_separate_namespace() {
     let comments = Store::with_prefix(&repo, RefPrefix::new("refs/comments").unwrap());
 
     let commit = head_commit(&repo);
-    let binding = Binding::Commit { commit };
+    let binding = Binding::Commit {
+        commit: commit.into(),
+    };
 
     let anchor_id = anchors.attach(&binding, b"an anchor note", None).unwrap();
     let comment_id = comments

@@ -230,7 +230,7 @@ mod tests {
             id: ObjectId::null(gix::hash::Kind::Sha1),
             target: ObjectId::null(gix::hash::Kind::Sha1),
             binding: gix_anchor::Binding::Commit {
-                commit: ObjectId::null(gix::hash::Kind::Sha1),
+                commit: ObjectId::null(gix::hash::Kind::Sha1).into(),
             },
             message: message.to_owned(),
             attachment: None,

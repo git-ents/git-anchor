@@ -62,18 +62,6 @@ pub enum Error {
     /// `gix` object store the codec was given.
     #[error(transparent)]
     Deserialize(#[from] facet_git_tree::DeserializeError),
-    /// A stored tree's entry names matched none of [`crate::Binding`]'s five
-    /// variant shapes ([`crate::Binding::deserialize`]'s sniffing rule):
-    /// neither `blob`+`content` (`Position`), `base_tree` (`Delta`),
-    /// `witness`+`tree` (`Tree`), exactly `{commit, tree}` (`Hybrid`), nor
-    /// exactly `{commit}` (`Commit`).
-    #[error("tree {id} does not match any known binding shape (entries: {entries:?})")]
-    UnknownBindingShape {
-        /// The tree that could not be recognized as any binding variant.
-        id: ObjectId,
-        /// The entry names actually present in that tree.
-        entries: Vec<String>,
-    },
     /// [`crate::Store::create`] minted a genesis commit whose oid already
     /// names an existing note ref — an identity collision rather than a
     /// transient compare-and-swap race, so retrying would spin forever.

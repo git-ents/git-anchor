@@ -640,7 +640,9 @@ mod tests {
     #[test]
     fn attach_writes_the_ref_at_prefix_target_id() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"note", None).unwrap();
 
         let expected =
@@ -651,7 +653,9 @@ mod tests {
     #[test]
     fn prefix_boundary_is_a_whole_segment_not_a_string_prefix() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"note", None).unwrap();
 
         // "refs/anchorsfoo" shares a string prefix with "refs/anchors" but is
@@ -686,7 +690,9 @@ mod tests {
     #[test]
     fn attach_then_get_round_trips_with_no_repository() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"hello", None).unwrap();
 
         let note = store.get(id).unwrap().expect("note exists");
@@ -702,7 +708,9 @@ mod tests {
     #[test]
     fn reattach_versions_the_same_ref_forward() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id1 = store.attach(&binding, b"v1", None).unwrap();
         let id2 = store.attach(&binding, b"v2", None).unwrap();
         assert_eq!(id1, id2, "binding-keyed: same binding, same identity");
@@ -712,7 +720,9 @@ mod tests {
     #[test]
     fn create_twice_on_the_same_binding_mints_two_distinct_refs() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let first = store.create(&binding, b"a", None, None, None, "a").unwrap();
         let second = store.create(&binding, b"b", None, None, None, "b").unwrap();
         assert_ne!(first, second, "genesis-keyed: distinct identities");
@@ -724,7 +734,9 @@ mod tests {
     #[test]
     fn reattach_preserves_the_original_created_at() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"v1", None).unwrap();
         let first_created_at = store.get(id).unwrap().unwrap().created_at;
 
@@ -738,7 +750,9 @@ mod tests {
     #[test]
     fn update_preserves_the_original_created_at() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.create(&binding, b"a", None, None, None, "a").unwrap();
         let first_created_at = store.get(id).unwrap().unwrap().created_at;
 
@@ -754,7 +768,9 @@ mod tests {
     #[test]
     fn history_lists_commits_tip_first() {
         let store = memory_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"v1", None).unwrap();
         let first_commit = store.get(id).unwrap().unwrap().commit;
         store.attach(&binding, b"v2", None).unwrap();
@@ -918,7 +934,9 @@ mod tests {
             objects: ObjectStore::default(),
             prefix: prefix(),
         };
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"note", None).unwrap();
         let commit = store.history(id).unwrap()[0];
 
@@ -961,7 +979,9 @@ mod tests {
     #[test]
     fn attach_with_attachment_retries_and_forwards_the_winners_created_at() {
         let store = flaky_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"v1", None).unwrap();
         let refname = store.note_ref(binding.target(), id);
         let original_tip = store.refs.read(&refname).unwrap().unwrap();
@@ -1002,7 +1022,9 @@ mod tests {
     #[test]
     fn update_retries_and_carries_the_winners_binding_and_created_at_forward() {
         let store = flaky_store();
-        let original_binding = Binding::Commit { commit: hex(1) };
+        let original_binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store
             .create(&original_binding, b"a", None, None, None, "a")
             .unwrap();
@@ -1012,7 +1034,9 @@ mod tests {
         // A concurrent writer's version carries a different binding and a
         // distinguishable created_at: `update` must pick both up off the
         // winning tip, not off the value read before the race.
-        let winner_binding = Binding::Commit { commit: hex(2) };
+        let winner_binding = Binding::Commit {
+            commit: hex(2).into(),
+        };
         let winner_binding_id = winner_binding.serialize_into(&store.objects).unwrap();
         let winner_created_at = 123_456_789;
         let winner_commit = write_note_commit(
@@ -1044,7 +1068,9 @@ mod tests {
     #[test]
     fn remove_retries_and_deletes_the_winning_tip() {
         let store = flaky_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         let id = store.attach(&binding, b"v1", None).unwrap();
         let refname = store.note_ref(binding.target(), id);
         let original_tip = store.refs.read(&refname).unwrap().unwrap();
@@ -1064,7 +1090,9 @@ mod tests {
     #[test]
     fn create_returns_genesis_exists_when_the_ref_is_present_after_a_lost_race() {
         let store = flaky_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         store.refs.push_collide();
 
         let err = store
@@ -1076,7 +1104,9 @@ mod tests {
     #[test]
     fn create_retries_to_success_on_pure_contention() {
         let store = flaky_store();
-        let binding = Binding::Commit { commit: hex(1) };
+        let binding = Binding::Commit {
+            commit: hex(1).into(),
+        };
         store.refs.push_phantom();
 
         let id = store

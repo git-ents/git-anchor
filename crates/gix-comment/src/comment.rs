@@ -541,7 +541,13 @@ mod tests {
 
         let commit = git_repo.head_id().unwrap().detach();
         let id = comments
-            .add(&Binding::Commit { commit }, "looks good to me", None)
+            .add(
+                &Binding::Commit {
+                    commit: commit.into(),
+                },
+                "looks good to me",
+                None,
+            )
             .unwrap();
 
         let comment = comments.get(id).unwrap().expect("exists");
@@ -595,7 +601,13 @@ mod tests {
 
         let commit = git_repo.head_id().unwrap().detach();
         let id = comments
-            .add(&Binding::Commit { commit }, "first", None)
+            .add(
+                &Binding::Commit {
+                    commit: commit.into(),
+                },
+                "first",
+                None,
+            )
             .unwrap();
         let id2 = comments.edit(id, "second", None).unwrap();
         assert_eq!(id, id2, "same identity");
@@ -631,7 +643,13 @@ mod tests {
 
         let commit = git_repo.head_id().unwrap().detach();
         let id = comments
-            .add(&Binding::Commit { commit }, "delete me", None)
+            .add(
+                &Binding::Commit {
+                    commit: commit.into(),
+                },
+                "delete me",
+                None,
+            )
             .unwrap();
         assert!(comments.remove(id).unwrap());
         assert!(comments.get(id).unwrap().is_none());
@@ -647,7 +665,9 @@ mod tests {
         let comments = Comments::open(&git_repo);
 
         let commit = git_repo.head_id().unwrap().detach();
-        let binding = Binding::Commit { commit };
+        let binding = Binding::Commit {
+            commit: commit.into(),
+        };
         let first = comments.add(&binding, "first take", None).unwrap();
         let second = comments.add(&binding, "second take", None).unwrap();
         assert_ne!(first, second);
@@ -708,7 +728,9 @@ mod tests {
         let comments = Comments::open(&git_repo);
 
         let commit = git_repo.head_id().unwrap().detach();
-        let binding = Binding::Commit { commit };
+        let binding = Binding::Commit {
+            commit: commit.into(),
+        };
 
         let root_a = comments.add(&binding, "root a", None).unwrap();
         let reply_a1 = comments.reply(root_a, "a reply one", None).unwrap();
@@ -759,7 +781,13 @@ mod tests {
 
         let commit = git_repo.head_id().unwrap().detach();
         let id = comments
-            .add(&Binding::Commit { commit }, "needs review", None)
+            .add(
+                &Binding::Commit {
+                    commit: commit.into(),
+                },
+                "needs review",
+                None,
+            )
             .unwrap();
         assert_eq!(comments.history(id).unwrap().len(), 1);
 
@@ -800,7 +828,9 @@ mod tests {
         let comments = Comments::open(&git_repo);
 
         let commit = git_repo.head_id().unwrap().detach();
-        let binding = Binding::Commit { commit };
+        let binding = Binding::Commit {
+            commit: commit.into(),
+        };
 
         let open_root = comments.add(&binding, "open root", None).unwrap();
         let resolved_root = comments.add(&binding, "resolved root", None).unwrap();
