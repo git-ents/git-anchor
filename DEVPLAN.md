@@ -56,6 +56,10 @@ Follow `gix-store`'s pattern (`store.rs`/`refname.rs`): serialized anchor trees 
 **Decision:** depend on `gix-store` (git dep on git-store) vs. reimplement the small ref-store layer here.
 Recommend depending on it — the user said to *use* git-store, and it keeps retention (`anchor.retention`: content stored as real blobs, never gitlinks) in one place.
 
+**What actually shipped, and the correction:** this recommendation was not followed — `store.rs`/`refname.rs` reimplement per-ref locking, CAS retry, and refname validation locally, taking only `facet-git-tree` from git-store.
+`../git-store` has since factored exactly that layer out as `gix-refstore`, and `DEVPLAN-attest.md` Phase 0 migrates this crate onto it before `gix-attest` is built, so the family ends up with one ref-CAS engine rather than two.
+Treat that phase, not this line, as the live plan.
+
 ## Phase 4 — `crates/git-anchor` (CLI)
 
 Mirror git-store's CLI crate (`clap` derive, `anyhow`, thin `main.rs`).
@@ -89,5 +93,8 @@ Integration tests with `test-support` + `tempfile` fixtures per subcommand.
 ## Open decisions (recommendations inline above)
 
 1. `facet-git-tree` dependency source (published vs. git dep on git-store).
+   Resolved: git dep on git-store.
 2. Depend on `gix-store` for ref persistence vs. local minimal ref layer.
+   Resolved late: shipped as a local layer, then migrated onto `gix-refstore` — see Phase 3's correction above.
 3. Ref namespace layout for stored anchors (`refs/anchors/...`).
+   Resolved: `refs/anchors/<target-hex>/<id-hex>`, prefix-configurable via `Store::with_prefix`.
