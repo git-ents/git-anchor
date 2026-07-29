@@ -106,7 +106,6 @@ mod error;
 #[cfg(test)]
 mod fixture;
 mod projection;
-mod refname;
 mod store;
 mod util;
 
@@ -114,6 +113,7 @@ pub use anchor::{Anchor, LineRange, capture, capture_worktree, snippet};
 pub use binding::{Binding, EvalState, Validity, revalidate};
 pub use diff::{TreeChange, diff_trees};
 pub use error::{Error, Result};
+pub use gix_refstore::RefPrefix;
 pub use projection::{
     Content, PROJECTION_HEURISTIC_VERSION, Position, Projection, project, project_candidates,
     project_exact, project_from_context, project_many, project_worktree,

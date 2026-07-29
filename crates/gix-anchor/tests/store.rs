@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use gix_anchor::{Binding, LineRange, Store};
+use gix_anchor::{Binding, LineRange, RefPrefix, Store};
 
 fn fixture_repo(content: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -336,7 +336,7 @@ fn with_prefix_roots_a_separate_namespace() {
     let dir = fixture_repo(&numbered(1..=5));
     let repo = gix::open(dir.path()).unwrap();
     let anchors = Store::open(&repo);
-    let comments = Store::with_prefix(&repo, "refs/comments");
+    let comments = Store::with_prefix(&repo, RefPrefix::new("refs/comments").unwrap());
 
     let commit = head_commit(&repo);
     let binding = Binding::Commit { commit };

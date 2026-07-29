@@ -74,18 +74,6 @@ pub enum Error {
         /// The entry names actually present in that tree.
         entries: Vec<String>,
     },
-    /// A [`crate::Store`] ref-path component was not usable as a Git
-    /// ref-name segment. In practice this never fires — both components are
-    /// hex [`ObjectId`] text — but it is checked anyway rather than trusted.
-    #[error("invalid {what} {value:?}: {reason}")]
-    InvalidRefComponent {
-        /// Which component was rejected (`"target"` or `"id"`).
-        what: &'static str,
-        /// The offending value.
-        value: String,
-        /// Why it was rejected.
-        reason: &'static str,
-    },
     /// A [`crate::Store::attach`] write lost its compare-and-swap race too
     /// many times in a row.
     #[error("gave up updating {refname} after {attempts} contended attempts")]

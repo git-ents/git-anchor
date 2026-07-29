@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use gix::ObjectId;
 use gix::bstr::ByteSlice as _;
-use gix_anchor::{Binding, Store, StoredNote};
+use gix_anchor::{Binding, RefPrefix, Store, StoredNote};
 
 use crate::error::{Error, Result};
 
@@ -146,9 +146,10 @@ impl<'r> Comments<'r> {
     /// both share the same underlying [`Store`] engine.
     #[must_use]
     pub fn open(repo: &'r gix::Repository) -> Comments<'r> {
+        let prefix = RefPrefix::new("refs/comments").expect("valid ref prefix");
         Comments {
             repo,
-            store: Store::with_prefix(repo, "refs/comments"),
+            store: Store::with_prefix(repo, prefix),
         }
     }
 
