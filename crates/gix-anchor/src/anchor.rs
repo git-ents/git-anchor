@@ -3,10 +3,10 @@
 //! Spec coverage: `anchor.definition`, `anchor.immutable`, `anchor.retention`.
 
 use facet::Facet;
-use gix::ObjectId;
 use gix::bstr::ByteSlice as _;
 
 use crate::error::{Error, Result};
+use crate::oid::Oid;
 use crate::util::{lines_of, read_blob, resolve_commit};
 
 /// A 1-based inclusive range of lines within an anchored file.
@@ -96,14 +96,22 @@ pub(crate) const CONTEXT_MARGIN: u64 = 3;
 ///     (entry.mode.kind(), entry.oid)
 /// };
 /// assert_eq!(kind, EntryKind::Blob, "never a gitlink");
-/// assert_ne!(oid, anchor.blob());
+/// assert_ne!(oid, gix::ObjectId::from(anchor.blob));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Anchor {
-    pub(crate) commit: [u8; 20],
+    /// The commit `self` was captured against, recorded on a best-effort
+    /// basis: nothing keeps it reachable, so it may be gone (garbage
+    /// collected) by the time the anchor is read back.
+    /// [`crate::project_exact`] needs it to still exist;
+    /// [`crate::project_from_context`] does not.
+    pub commit: Oid,
     /// The repository-relative path of the anchored file at `commit`.
     pub path: String,
-    pub(crate) blob: [u8; 20],
+    /// The object id of the anchored file's blob at [`Anchor::commit`] — an
+    /// integrity check and the fast path for "has this file changed at
+    /// all".
+    pub blob: Oid,
     /// The anchored lines, or `None` for a whole-file anchor.
     pub lines: Option<LineRange>,
     /// The anchored blob's full bytes, embedded verbatim
@@ -114,26 +122,6 @@ pub struct Anchor {
     /// [`capture`] time for [`crate::project_from_context`] to fuzzy-match
     /// against once `commit` is gone.
     pub context: Vec<u8>,
-}
-
-impl Anchor {
-    /// The commit `self` was captured against, recorded on a best-effort
-    /// basis: nothing keeps it reachable, so it may be gone (garbage
-    /// collected) by the time the anchor is read back.
-    /// [`crate::project_exact`] needs it to still exist;
-    /// [`crate::project_from_context`] does not.
-    #[must_use]
-    pub fn commit(&self) -> ObjectId {
-        ObjectId::from_bytes_or_panic(&self.commit)
-    }
-
-    /// The object id of the anchored file's blob at [`Anchor::commit`] — an
-    /// integrity check and the fast path for "has this file changed at
-    /// all".
-    #[must_use]
-    pub fn blob(&self) -> ObjectId {
-        ObjectId::from_bytes_or_panic(&self.blob)
-    }
 }
 
 /// Build the [`Anchor`] for `path` (and optionally `lines`) as it exists at
@@ -184,14 +172,10 @@ pub fn capture(
     }
     let context = capture_context(&content, lines);
 
-    let mut commit_bytes = [0u8; 20];
-    commit_bytes.copy_from_slice(commit_id.as_slice());
-    let mut blob_bytes = [0u8; 20];
-    blob_bytes.copy_from_slice(blob.as_slice());
     Ok(Anchor {
-        commit: commit_bytes,
+        commit: commit_id.into(),
         path: path.to_owned(),
-        blob: blob_bytes,
+        blob: blob.into(),
         lines,
         content,
         context,
@@ -234,7 +218,7 @@ pub fn capture(
 /// let repo = gix::open(dir.path()).expect("open");
 /// let anchor = gix_anchor::capture_worktree(&repo, "file.txt", None).expect("capture");
 /// assert_eq!(gix_anchor::snippet(&anchor).unwrap(), "edited, not yet committed\n");
-/// assert_eq!(anchor.commit(), repo.head_id().expect("head").detach());
+/// assert_eq!(gix::ObjectId::from(anchor.commit), repo.head_id().expect("head").detach());
 /// ```
 pub fn capture_worktree(
     repo: &gix::Repository,
@@ -268,14 +252,10 @@ pub fn capture_worktree(
         .detach();
     let context = capture_context(&content, lines);
 
-    let mut commit_bytes = [0u8; 20];
-    commit_bytes.copy_from_slice(commit_id.as_slice());
-    let mut blob_bytes = [0u8; 20];
-    blob_bytes.copy_from_slice(blob.as_slice());
     Ok(Anchor {
-        commit: commit_bytes,
+        commit: commit_id.into(),
         path: path.to_owned(),
-        blob: blob_bytes,
+        blob: blob.into(),
         lines,
         content,
         context,
@@ -341,6 +321,7 @@ mod tests {
     )]
 
     use facet::{Facet as _, Type, UserType};
+    use gix::ObjectId;
     use rstest::rstest;
 
     use super::*;
@@ -358,7 +339,7 @@ mod tests {
         let git_repo = gix::open(dir.path()).unwrap();
 
         let anchor = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
-        assert_eq!(anchor.commit().to_string(), head(dir.path()));
+        assert_eq!(ObjectId::from(anchor.commit).to_string(), head(dir.path()));
         assert_eq!(anchor.path, "file.txt");
         assert_eq!(anchor.lines, range(3, 4));
         assert_eq!(anchor.content, numbered(1..=10).into_bytes());
@@ -432,14 +413,14 @@ mod tests {
         let git_repo = gix::open(dir.path()).unwrap();
 
         let anchor = capture_worktree(&git_repo, "file.txt", range(5, 6)).unwrap();
-        assert_eq!(anchor.commit().to_string(), head(dir.path()));
+        assert_eq!(ObjectId::from(anchor.commit).to_string(), head(dir.path()));
         assert_eq!(anchor.content, dirty.clone().into_bytes());
         assert_eq!(snippet(&anchor).unwrap(), "line five\nline 6\n");
         // The blob exists in the odb from the moment of capture, under the
         // on-disk bytes' own id — not HEAD's version of the file.
-        assert!(git_repo.has_object(anchor.blob()));
+        assert!(git_repo.has_object(ObjectId::from(anchor.blob)));
         let committed = capture(&git_repo, "HEAD", "file.txt", None).unwrap();
-        assert_ne!(anchor.blob(), committed.blob());
+        assert_ne!(anchor.blob, committed.blob);
     }
 
     /// The anchor survives the uncommitted content being committed

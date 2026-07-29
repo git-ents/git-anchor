@@ -25,28 +25,9 @@ use gix_object::{Find, Write};
 
 use crate::anchor::Anchor;
 use crate::error::{Error, Result};
+use crate::oid::Oid;
 use crate::projection::{Projection, project};
 use crate::util::resolve_commit;
-
-/// A 20-byte object id, wrapped so it can derive [`Facet`] — [`ObjectId`]
-/// itself is defined outside this crate and cannot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
-#[facet(transparent)]
-pub struct Oid([u8; 20]);
-
-impl From<ObjectId> for Oid {
-    fn from(id: ObjectId) -> Self {
-        let mut bytes = [0u8; 20];
-        bytes.copy_from_slice(id.as_slice());
-        Self(bytes)
-    }
-}
-
-impl From<Oid> for ObjectId {
-    fn from(oid: Oid) -> Self {
-        ObjectId::from_bytes_or_panic(&oid.0)
-    }
-}
 
 /// The single typed-reference vocabulary into the object graph: what a
 /// claim, comment, or review is *about*.
@@ -147,7 +128,7 @@ impl Binding {
                 head_witness,
                 ..
             } => vec![ObjectId::from(*base_witness), ObjectId::from(*head_witness)],
-            Self::Position(anchor) => vec![anchor.commit()],
+            Self::Position(anchor) => vec![ObjectId::from(anchor.commit)],
         }
     }
 
@@ -172,7 +153,7 @@ impl Binding {
             Self::Commit { commit } | Self::Hybrid { commit, .. } => ObjectId::from(*commit),
             Self::Tree { tree, .. } => ObjectId::from(*tree),
             Self::Delta { head_tree, .. } => ObjectId::from(*head_tree),
-            Self::Position(anchor) => anchor.blob(),
+            Self::Position(anchor) => ObjectId::from(anchor.blob),
         }
     }
 
@@ -225,7 +206,7 @@ impl Binding {
                 },
             ) => base_a == base_b && head_a == head_b,
             (Self::Position(a), Self::Position(b)) => {
-                a.blob() == b.blob() && a.lines == b.lines && a.commit() == b.commit()
+                a.blob == b.blob && a.lines == b.lines && a.commit == b.commit
             }
             (
                 Self::Hybrid {
@@ -651,7 +632,7 @@ mod tests {
         let Binding::Position(anchor) = &binding else {
             panic!("sample_position must build a Position");
         };
-        assert_eq!(binding.witnesses(), vec![anchor.commit()]);
+        assert_eq!(binding.witnesses(), vec![ObjectId::from(anchor.commit)]);
     }
 
     #[test]

@@ -290,7 +290,7 @@ pub fn project_candidates(
     let primary = project_exact_onto(repo, anchor, &target_tree)?;
 
     let (needle, lines) = match &primary {
-        Projection::Current => (anchor.blob(), anchor.lines),
+        Projection::Current => (ObjectId::from(anchor.blob), anchor.lines),
         Projection::Relocated { path, lines } => {
             let id = target_tree
                 .lookup_entry_by_path(path)
@@ -305,7 +305,7 @@ pub fn project_candidates(
         Projection::Outdated { .. } | Projection::Deleted => return Ok(vec![primary]),
     };
 
-    let anchor_blob = anchor.blob();
+    let anchor_blob = ObjectId::from(anchor.blob);
     let mut candidates: Vec<(String, Projection)> = target_tree
         .traverse()
         .breadthfirst
@@ -342,8 +342,8 @@ fn project_exact_onto(
     anchor: &Anchor,
     target_tree: &gix::Tree<'_>,
 ) -> Result<Projection> {
-    let anchor_blob = anchor.blob();
-    let anchor_commit_id = anchor.commit();
+    let anchor_blob = ObjectId::from(anchor.blob);
+    let anchor_commit_id = ObjectId::from(anchor.commit);
 
     if let Some(entry) = target_tree
         .lookup_entry_by_path(&anchor.path)
@@ -1018,7 +1018,7 @@ mod tests {
     fn with_missing_commit(anchor: &Anchor) -> Anchor {
         let mut forged = anchor.clone();
         let fake = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
-        forged.commit.copy_from_slice(fake.as_slice());
+        forged.commit = fake.into();
         forged
     }
 

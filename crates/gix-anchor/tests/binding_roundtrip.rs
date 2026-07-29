@@ -171,8 +171,11 @@ fn the_fixture_deserializes_as_a_position_binding() {
     assert_eq!(anchor.lines, Some(LineRange { start: 3, end: 4 }));
     assert_eq!(anchor.content, numbered(1..=10).into_bytes());
     assert_eq!(anchor.context, numbered(1..=7).into_bytes());
-    assert_eq!(anchor.blob().to_string(), CONTENT_OID);
-    assert_eq!(anchor.commit().to_string(), COMMIT_ENTRY_RAW);
+    assert_eq!(gix::ObjectId::from(anchor.blob).to_string(), CONTENT_OID);
+    assert_eq!(
+        gix::ObjectId::from(anchor.commit).to_string(),
+        COMMIT_ENTRY_RAW
+    );
 }
 
 /// Item 4: re-encoding the decoded binding into a fresh store reproduces

@@ -1013,7 +1013,7 @@ fn binding_kind(binding: &Binding) -> &'static str {
 /// filtering on `target` alone would silently omit it.
 fn position_commit(binding: &Binding) -> Option<ObjectId> {
     match binding {
-        Binding::Position(anchor) => Some(anchor.commit()),
+        Binding::Position(anchor) => Some(ObjectId::from(anchor.commit)),
         _ => None,
     }
 }

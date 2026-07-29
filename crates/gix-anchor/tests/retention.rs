@@ -77,7 +77,7 @@ fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
     assert_eq!(content.mode.kind(), EntryKind::Blob);
     assert_ne!(
         content.oid,
-        anchor.blob(),
+        gix::ObjectId::from(anchor.blob),
         "serialized leaf encoding stores retained bytes under a storage-leaf oid"
     );
     let context = entries
