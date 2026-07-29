@@ -363,8 +363,8 @@ fn with_prefix_roots_a_separate_namespace() {
     drop(reference);
 }
 
-/// `anchor.retention`: the anchored blob stays reachable by walking the
-/// note's own committed tree — the store's ref keeps it alive through
+/// `anchor.retention`: the retained content leaf stays reachable by walking
+/// the note's own committed tree — the store's ref keeps it alive through
 /// force-push, branch deletion, and gc with no special-casing.
 #[test]
 fn anchored_content_is_reachable_from_the_notes_own_tree() {
@@ -373,7 +373,17 @@ fn anchored_content_is_reachable_from_the_notes_own_tree() {
     let store = Store::open(&repo);
 
     let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap();
-    let blob = anchor.blob();
+    let retained_content = {
+        let memory = facet_git_tree::ObjectStore::default();
+        let tree = facet_git_tree::serialize_into(&anchor, &memory).expect("serialize anchor");
+        memory
+            .get_tree(&tree)
+            .expect("anchor tree")
+            .into_iter()
+            .find(|entry| entry.filename == "content")
+            .expect("content entry")
+            .oid
+    };
     let binding = Binding::Position(anchor);
 
     let id = store.attach(&binding, b"reachability check", None).unwrap();
@@ -395,13 +405,13 @@ fn anchored_content_is_reachable_from_the_notes_own_tree() {
             let entry = entry.expect("tree entry");
             if entry.mode().is_tree() {
                 stack.push(entry.object_id());
-            } else if entry.object_id() == blob {
+            } else if entry.object_id() == retained_content {
                 found = true;
             }
         }
     }
     assert!(
         found,
-        "the anchored blob must be reachable from the note's own tree"
+        "the retained content blob must be reachable from the note's own tree"
     );
 }

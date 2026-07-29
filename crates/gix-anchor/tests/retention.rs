@@ -44,9 +44,8 @@ fn numbered(range: std::ops::RangeInclusive<u32>) -> String {
 }
 
 /// The serialized anchor's `content` and `context` entries are blobs — mode
-/// `100644`, never a gitlink (`160000`) — and `content`'s object id is the
-/// anchored blob's own id: referenced by content addressing, not copied
-/// under a new identity.
+/// `100644`, never a gitlink (`160000`) — and `content` is retained as a
+/// storage leaf blob (decoded back byte-for-byte by deserialization).
 #[test]
 fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
     let dir = fixture_repo(&numbered(1..=10));
@@ -76,10 +75,10 @@ fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
         .find(|e| e.filename == "content")
         .expect("content entry");
     assert_eq!(content.mode.kind(), EntryKind::Blob);
-    assert_eq!(
+    assert_ne!(
         content.oid,
         anchor.blob(),
-        "content addressing must reproduce the anchored blob's own id"
+        "serialized leaf encoding stores retained bytes under a storage-leaf oid"
     );
     let context = entries
         .iter()
@@ -100,6 +99,14 @@ fn anchored_content_is_reachable_from_the_storing_documents_tree() {
 
     let store = ObjectStore::default();
     let anchor_tree = serialize_into(&anchor, &store).expect("serialize anchor");
+    let retained_content = store
+        .get_tree(&anchor_tree)
+        .expect("anchor tree")
+        .into_iter()
+        .find(|entry| entry.filename == "content")
+        .expect("content entry")
+        .oid;
+
     let comment = Comment {
         body: "anchored".to_owned(),
         anchor: RawTree::new(anchor_tree),
@@ -115,7 +122,7 @@ fn anchored_content_is_reachable_from_the_storing_documents_tree() {
             match entry.mode.kind() {
                 EntryKind::Tree => stack.push(entry.oid),
                 _ => {
-                    if entry.oid == anchor.blob() {
+                    if entry.oid == retained_content {
                         found = true;
                     }
                 }
@@ -124,7 +131,7 @@ fn anchored_content_is_reachable_from_the_storing_documents_tree() {
     }
     assert!(
         found,
-        "the anchored blob must be reachable from the comment's own tree"
+        "the retained content blob must be reachable from the comment's own tree"
     );
 }
 

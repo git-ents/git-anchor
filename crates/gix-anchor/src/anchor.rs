@@ -87,8 +87,8 @@ pub(crate) const CONTEXT_MARGIN: u64 = 3;
 /// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", Some(LineRange { start: 3, end: 4 }))
 ///     .expect("capture");
 ///
-/// // The embedded content reproduces the exact anchored blob's own object
-/// // id — "referenced ... rather than copied" (`anchor.retention`).
+/// // The embedded content is retained as a storage leaf blob (still a
+/// // normal blob entry, never a gitlink).
 /// let (root, store) = serialize(&anchor).expect("serialize");
 /// let (kind, oid) = {
 ///     let entries = store.get_tree(&root).expect("tree");
@@ -96,7 +96,7 @@ pub(crate) const CONTEXT_MARGIN: u64 = 3;
 ///     (entry.mode.kind(), entry.oid)
 /// };
 /// assert_eq!(kind, EntryKind::Blob, "never a gitlink");
-/// assert_eq!(oid, anchor.blob());
+/// assert_ne!(oid, anchor.blob());
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Anchor {
@@ -107,8 +107,7 @@ pub struct Anchor {
     /// The anchored lines, or `None` for a whole-file anchor.
     pub lines: Option<LineRange>,
     /// The anchored blob's full bytes, embedded verbatim
-    /// (`anchor.retention`) — reproduces [`Anchor::blob`]'s object id when
-    /// written into any store, by content addressing.
+    /// (`anchor.retention`) and serialized as a storage leaf blob.
     pub content: Vec<u8>,
     /// A window of up to `CONTEXT_MARGIN` (three) lines on either side of `lines`
     /// (or the whole file, for a whole-file anchor), captured fresh at
