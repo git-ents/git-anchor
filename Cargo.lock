@@ -787,6 +787,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "git-attest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "facet",
+ "facet-git-tree",
+ "facet-json",
+ "facet-value",
+ "gix",
+ "gix-attest",
+ "gix-store",
+ "tempfile",
+ "test-support",
+]
+
+[[package]]
 name = "gix"
 version = "0.85.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
