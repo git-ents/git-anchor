@@ -1,13 +1,69 @@
 //! Drive the built `git-anchor` binary against a temp repo, exactly as
 //! `git anchor …` would.
+//!
+//! `git-anchor` defines no document type of its own (`DEVPLAN-boundary.md`
+//! Phase 3), so every test here first publishes a schema for some test
+//! fixture kind — the same thing `gix-comment` or any other `gix-store`
+//! consumer would already have done before a user ever runs `git anchor`.
 
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use facet::Facet;
+use gix_anchor::Binding;
+use gix_store::{Layout, RefPrefix, RefSegment, RepoStore};
 use test_support::init_repo;
 
 const BIN: &str = env!("CARGO_BIN_EXE_git-anchor");
+
+/// A minimal anchorable document: a binding plus one required `String`
+/// field — enough to exercise `add`'s positional-argument rule end to end.
+#[derive(Facet)]
+struct Doc {
+    binding: Binding,
+    body: String,
+}
+
+/// An anchorable document with two required `String` fields besides the
+/// binding — `add`'s positional argument must refuse as ambiguous rather
+/// than guess which one it means.
+#[derive(Facet)]
+struct TwoStrings {
+    binding: Binding,
+    a: String,
+    b: String,
+}
+
+/// An anchorable document with a required field no positional argument can
+/// ever fill (not `String`) — only `--json` can complete it.
+#[derive(Facet)]
+struct WithCount {
+    binding: Binding,
+    count: u64,
+}
+
+/// A document with no `Binding` field at all — not anchorable.
+#[derive(Facet)]
+struct Plain {
+    text: String,
+}
+
+/// The exact shape `crates/gix-anchor/src/store.rs`'s (Phase-2-scoped,
+/// pre-deletion) `Note` publishes as the `notes` kind under `refs/comments`
+/// — reproduced here structurally, rather than depending on that module's
+/// own store type, so this test survives Phase 2 deleting it. Publishing
+/// only the schema (never attaching through it) is enough: `add`'s refusal
+/// path never reads an existing entity.
+#[derive(Facet)]
+struct Note {
+    body: Vec<u8>,
+    binding: Binding,
+    attachment: Option<facet_git_tree::RawTree>,
+    parent: Option<String>,
+    state: Option<String>,
+    created_at: u64,
+}
 
 /// `range.map(|n| "line {n}\n")` concatenated — a small multi-line fixture
 /// file to anchor into.
@@ -78,103 +134,247 @@ fn setup(path: &Path) {
     commit_all(path, "one");
 }
 
-#[test]
-fn add_with_path_and_lines_then_list_and_show() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, err, ok) = run(
-        path,
-        None,
-        &["add", "--path", "file.txt", "-L", "2,4", "-m", "note"],
-    );
-    assert!(ok, "add failed: {err}");
-    let id = out.trim().to_owned();
-    assert_eq!(id.len(), 40, "expected a full hex id: {out}");
-
-    let (out, err, ok) = run(path, None, &["list"]);
-    assert!(ok, "list failed: {err}");
-    assert!(out.contains(&id[..8]), "list output: {out}");
-    assert!(out.contains("note"), "list output: {out}");
-
-    let (out, err, ok) = run(path, None, &["show", &id]);
-    assert!(ok, "show failed: {err}");
-    assert!(out.contains("note"), "show output: {out}");
-    assert!(out.contains("line 2\nline 3\nline 4"), "show output: {out}");
-    assert!(out.contains("binding: position"), "show output: {out}");
-}
-
-#[test]
-fn add_without_path_attaches_to_head_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, err, ok) = run(path, None, &["add", "-m", "whole commit note"]);
-    assert!(ok, "add failed: {err}");
-    let id = out.trim().to_owned();
-
-    let (out, err, ok) = run(path, None, &["list"]);
-    assert!(ok, "list failed: {err}");
-    assert!(out.contains(&id[..8]), "list output: {out}");
-
-    let (out, err, ok) = run(path, None, &["show", &id]);
-    assert!(ok, "show failed: {err}");
-    assert!(out.contains("binding: commit"), "show output: {out}");
-    assert!(out.contains("whole commit note"), "show output: {out}");
-}
-
-#[test]
-fn show_accepts_a_prefix_and_rejects_ambiguous_or_missing_ids() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "one"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-
-    let (out, err, ok) = run(path, None, &["show", &id[..8]]);
-    assert!(ok, "show with prefix failed: {err}");
-    assert!(out.contains("one"), "show output: {out}");
-
-    let (_, err, ok) = run(path, None, &["show", "00"]);
-    assert!(!ok);
-    assert!(err.contains("no note matches"), "stderr: {err}");
-
-    // A single hex digit matches every note in this repo (there's only one),
-    // so pad the fixture with a second note to exercise ambiguity.
-    let (out2, _, ok) = run(path, None, &["add", "--path", "file.txt", "-m", "two"]);
-    assert!(ok);
-    let id2 = out2.trim().to_owned();
-    let common_prefix_len = id
-        .chars()
-        .zip(id2.chars())
-        .take_while(|(a, b)| a == b)
-        .count();
-    if common_prefix_len > 0 {
-        let (_, err, ok) = run(path, None, &["show", &id[..common_prefix_len]]);
-        assert!(!ok);
-        assert!(err.contains("ambiguous"), "stderr: {err}");
+/// The `{data, schema}` [`Layout`] `git-anchor` itself derives from a
+/// `--prefix` value — duplicated here (rather than depending on the binary's
+/// internals) since a fixture publisher is exactly the kind of independent
+/// `gix-store` consumer `git anchor` is meant to work with.
+fn layout(prefix: &str) -> Layout {
+    let prefix = RefPrefix::new(prefix).unwrap();
+    Layout {
+        data: prefix.child(&RefSegment::new("data").unwrap()),
+        schema: prefix.child(&RefSegment::new("schema").unwrap()),
     }
 }
 
+fn publish<T: for<'a> Facet<'a>>(repo_path: &Path, prefix: &str, kind: &str) {
+    let repo = gix::open(repo_path).unwrap();
+    let store = RepoStore::open_with_layout(&repo, layout(prefix));
+    store
+        .kind::<T>(RefSegment::new(kind).unwrap())
+        .publish()
+        .unwrap();
+}
+
+// ── the reflection-based field-population rule ──────────────────────────
+
 #[test]
-fn show_at_rev_reports_current_for_an_unchanged_anchor() {
+fn add_fills_binding_by_reflection_and_text_by_the_lone_string_field() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
 
     let (out, err, ok) = run(
         path,
         None,
-        &["add", "--path", "file.txt", "-L", "3,4", "-m", "note"],
+        &[
+            "add",
+            "doc",
+            "hello world",
+            "--path",
+            "file.txt",
+            "-L",
+            "2,4",
+        ],
     );
     assert!(ok, "add failed: {err}");
-    let id = out.trim().to_owned();
+    let name = out.trim().to_owned();
+    assert!(!name.is_empty());
 
-    let (out, err, ok) = run(path, None, &["show", &format!("{id}@HEAD")]);
+    let (out, err, ok) = run(path, None, &["show", "doc", &name, "--json"]);
+    assert!(ok, "show --json failed: {err}");
+    assert!(
+        out.contains("\"body\":\"hello world\""),
+        "show --json: {out}"
+    );
+    assert!(out.contains("\"Position\""), "show --json: {out}");
+}
+
+#[test]
+fn add_defaults_the_binding_to_head_when_no_path_is_given() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let (out, err, ok) = run(path, None, &["add", "doc", "whole commit"]);
+    assert!(ok, "add failed: {err}");
+    let name = out.trim().to_owned();
+
+    let (out, err, ok) = run(path, None, &["show", "doc", &name, "--json"]);
+    assert!(ok, "show failed: {err}");
+    assert!(out.contains("\"Commit\""), "show --json: {out}");
+    assert!(out.contains("whole commit"), "show --json: {out}");
+}
+
+#[test]
+fn add_refuses_a_kind_with_no_binding_field() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Plain>(path, "refs/anchors", "plain");
+
+    let (_, err, ok) = run(path, None, &["add", "plain", "hello"]);
+    assert!(!ok, "add on a non-anchorable kind should refuse");
+    assert!(err.contains("not anchorable"), "stderr: {err}");
+}
+
+#[test]
+fn add_refuses_an_ambiguous_positional_argument() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<TwoStrings>(path, "refs/anchors", "two");
+
+    let (_, err, ok) = run(path, None, &["add", "two", "which one"]);
+    assert!(!ok, "add should refuse with two String candidates");
+    assert!(err.contains('a') && err.contains('b'), "stderr: {err}");
+}
+
+#[test]
+fn add_refuses_required_fields_it_cannot_fill_from_the_command_line() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<WithCount>(path, "refs/anchors", "counted");
+
+    let (_, err, ok) = run(path, None, &["add", "counted"]);
+    assert!(!ok, "add should refuse an unfillable required field");
+    assert!(err.contains("count"), "stderr: {err}");
+    assert!(err.contains("--json"), "stderr: {err}");
+}
+
+#[test]
+fn add_json_supplies_the_document_and_still_gets_the_binding_injected() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<WithCount>(path, "refs/anchors", "counted");
+
+    let (out, err, ok) = run(path, None, &["add", "counted", "--json", "{\"count\": 5}"]);
+    assert!(ok, "add --json failed: {err}");
+    let name = out.trim().to_owned();
+
+    let (out, err, ok) = run(path, None, &["show", "counted", &name, "--json"]);
+    assert!(ok, "show --json failed: {err}");
+    assert!(out.contains("\"count\":5"), "show --json: {out}");
+    assert!(out.contains("\"Commit\""), "show --json: {out}");
+}
+
+// ── list / show / remove, generic over the kind ─────────────────────────
+
+#[test]
+fn list_and_remove_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let (out, _, ok) = run(path, None, &["add", "doc", "first"]);
+    assert!(ok);
+    let name = out.trim().to_owned();
+
+    let (out, err, ok) = run(path, None, &["list", "doc"]);
+    assert!(ok, "list failed: {err}");
+    assert!(out.contains(&name), "list output: {out}");
+    assert!(out.contains("first"), "list output: {out}");
+
+    let (out, err, ok) = run(path, None, &["list", "doc", "--json"]);
+    assert!(ok, "list --json failed: {err}");
+    assert!(
+        out.contains(&format!("\"name\":\"{name}\"")),
+        "list --json: {out}"
+    );
+
+    let (_, err, ok) = run(path, None, &["remove", "doc", &name]);
+    assert!(ok, "remove failed: {err}");
+
+    let (out, _, ok) = run(path, None, &["list", "doc"]);
+    assert!(ok);
+    assert_eq!(out.trim(), "", "doc should be empty after removal: {out}");
+
+    let (_, err, ok) = run(path, None, &["remove", "doc", &name]);
+    assert!(!ok, "second removal should fail");
+    assert!(err.contains("no entity"), "stderr: {err}");
+}
+
+#[test]
+fn remove_is_atomic_on_a_bad_name() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let (out, _, ok) = run(path, None, &["add", "doc", "one"]);
+    assert!(ok);
+    let name = out.trim().to_owned();
+
+    let (out_before, _, _) = run(path, None, &["list", "doc"]);
+    let (_, err, ok) = run(path, None, &["remove", "doc", &name, "not/a-real-name"]);
+    assert!(!ok, "remove with a bad name should fail atomically");
+    assert!(err.contains("no entity"), "stderr: {err}");
+    let (out_after, _, _) = run(path, None, &["list", "doc"]);
+    assert_eq!(
+        out_before, out_after,
+        "a failed multi-remove must not remove anything"
+    );
+}
+
+#[test]
+fn show_reports_no_entity_for_an_unknown_name() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let (_, err, ok) = run(
+        path,
+        None,
+        &[
+            "show",
+            "doc",
+            "0000000000000000000000000000000000000000/1111111111111111111111111111111111111111",
+        ],
+    );
+    assert!(!ok);
+    assert!(err.contains("no entity"), "stderr: {err}");
+}
+
+// ── bare invocation: list registered kinds ──────────────────────────────
+
+#[test]
+fn bare_invocation_lists_kinds_and_marks_anchorable_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+    publish::<Plain>(path, "refs/anchors", "plain");
+
+    let (out, err, ok) = run(path, None, &[]);
+    assert!(ok, "bare invocation failed: {err}");
+    assert!(out.contains("doc  (anchorable)"), "kinds output: {out}");
+    assert!(out.contains("plain"), "kinds output: {out}");
+    assert!(!out.contains("plain  (anchorable)"), "kinds output: {out}");
+}
+
+// ── projection: @<rev> and --worktree, over a reflected binding ─────────
+
+#[test]
+fn show_at_rev_projects_a_position_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let (out, err, ok) = run(
+        path,
+        None,
+        &["add", "doc", "note", "--path", "file.txt", "-L", "3,4"],
+    );
+    assert!(ok, "add failed: {err}");
+    let name = out.trim().to_owned();
+
+    let (out, err, ok) = run(path, None, &["show", "doc", &format!("{name}@HEAD")]);
     assert!(ok, "show @rev failed: {err}");
     assert!(out.contains("current"), "show @rev output: {out}");
 }
@@ -184,191 +384,15 @@ fn show_at_rev_rejects_a_commit_binding() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
 
-    let (out, _, ok) = run(path, None, &["add", "-m", "whole commit"]);
+    let (out, _, ok) = run(path, None, &["add", "doc", "whole commit"]);
     assert!(ok);
-    let id = out.trim().to_owned();
+    let name = out.trim().to_owned();
 
-    let (_, err, ok) = run(path, None, &["show", &format!("{id}@HEAD")]);
+    let (_, err, ok) = run(path, None, &["show", "doc", &format!("{name}@HEAD")]);
     assert!(!ok);
-    assert!(err.contains("line/blob"), "stderr: {err}");
-}
-
-#[test]
-fn remove_deletes_a_note_and_a_second_removal_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "to be removed"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-
-    let (_, err, ok) = run(path, None, &["remove", &id]);
-    assert!(ok, "remove failed: {err}");
-
-    let (out, _, ok) = run(path, None, &["list"]);
-    assert!(ok);
-    assert_eq!(out.trim(), "", "list should be empty after removal: {out}");
-
-    let (_, err, ok) = run(path, None, &["remove", &id]);
-    assert!(!ok, "second removal should fail");
-    assert!(err.contains("no note"), "stderr: {err}");
-}
-
-#[test]
-fn no_path_and_lines_together_is_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (_, err, ok) = run(path, None, &["add", "-L", "1,2", "-m", "bad"]);
-    assert!(!ok);
-    assert!(err.contains("--path"), "stderr: {err}");
-    assert!(err.contains("-L"), "stderr: {err}");
-}
-
-#[test]
-fn lines_with_an_embedded_path_works_with_no_separate_path_flag() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    // `-L START,END:path` supplies the path itself — no `--path` needed.
-    let (out, err, ok) = run(path, None, &["add", "-L", "2,4:file.txt", "-m", "note"]);
-    assert!(ok, "add with only an embedded -L path failed: {err}");
-    let id = out.trim().to_owned();
-
-    let (out, err, ok) = run(path, None, &["show", &id, "--json"]);
-    assert!(ok, "show --json failed: {err}");
-    assert!(out.contains("\"path\":\"file.txt\""), "show --json: {out}");
-    assert!(
-        out.contains("\"lines\":{\"start\":2,\"end\":4}"),
-        "show --json: {out}"
-    );
-}
-
-#[test]
-fn bare_invocation_lists_instead_of_erroring() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, err, ok) = run(path, None, &[]);
-    assert!(ok, "bare invocation failed: {err}");
-    assert_eq!(out.trim(), "", "no notes yet: {out}");
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "a note"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-
-    let (out, err, ok) = run(path, None, &[]);
-    assert!(ok, "bare invocation failed: {err}");
-    assert!(out.contains(&id[..8]), "bare list output: {out}");
-}
-
-#[test]
-fn edit_replaces_the_body_and_keeps_the_same_id() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "first body"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-
-    let (out, err, ok) = run(path, None, &["edit", &id, "-m", "second body"]);
-    assert!(ok, "edit failed: {err}");
-    assert_eq!(out.trim(), id, "edit reattaches the same identity oid");
-
-    let (out, err, ok) = run(path, None, &["show", &id]);
-    assert!(ok, "show failed: {err}");
-    assert!(out.contains("second body"), "show output: {out}");
-    assert!(!out.contains("first body"), "show output: {out}");
-}
-
-#[test]
-fn append_joins_new_content_with_a_blank_line() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "first paragraph"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-
-    let (_, err, ok) = run(path, None, &["append", &id, "-m", "second paragraph"]);
-    assert!(ok, "append failed: {err}");
-
-    let (out, err, ok) = run(path, None, &["show", &id, "--json"]);
-    assert!(ok, "show --json failed: {err}");
-    assert!(
-        out.contains("first paragraph\\n\\nsecond paragraph"),
-        "show --json output: {out}"
-    );
-}
-
-#[test]
-fn log_prints_every_version_newest_first() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "v1"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-    let (_, err, ok) = run(path, None, &["edit", &id, "-m", "v2"]);
-    assert!(ok, "edit failed: {err}");
-
-    let (out, err, ok) = run(path, None, &["log", &id]);
-    assert!(ok, "log failed: {err}");
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 2, "log output: {out}");
-    // Newest first: the most recent commit's line comes first.
-    for line in &lines {
-        let mut fields = line.split_whitespace();
-        let oid = fields.next().expect("oid field");
-        assert_eq!(oid.len(), 40, "log line: {line}");
-    }
-}
-
-#[test]
-fn show_ancestor_suffix_reads_older_versions_and_bounds_checks() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "v1 (oldest)"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-    let (_, _, ok) = run(path, None, &["edit", &id, "-m", "v2"]);
-    assert!(ok);
-    let (_, _, ok) = run(path, None, &["edit", &id, "-m", "v3 (tip)"]);
-    assert!(ok);
-
-    let (out, err, ok) = run(path, None, &["show", &id]);
-    assert!(ok, "show failed: {err}");
-    assert!(out.contains("v3 (tip)"), "show output: {out}");
-
-    let (out, err, ok) = run(path, None, &["show", &format!("{id}~0")]);
-    assert!(ok, "show ~0 failed: {err}");
-    assert!(out.contains("v3 (tip)"), "show ~0 output: {out}");
-
-    let (out, err, ok) = run(path, None, &["show", &format!("{id}~1")]);
-    assert!(ok, "show ~1 failed: {err}");
-    assert!(out.contains("v2"), "show ~1 output: {out}");
-
-    let (out, err, ok) = run(path, None, &["show", &format!("{id}^")]);
-    assert!(ok, "show ^ failed: {err}");
-    assert!(out.contains("v2"), "show ^ output: {out}");
-
-    let (out, err, ok) = run(path, None, &["show", &format!("{id}~2")]);
-    assert!(ok, "show ~2 failed: {err}");
-    assert!(out.contains("v1 (oldest)"), "show ~2 output: {out}");
-
-    let (_, err, ok) = run(path, None, &["show", &format!("{id}~3")]);
-    assert!(!ok, "out-of-range ancestor should fail");
-    assert!(err.contains("out of range"), "stderr: {err}");
+    assert!(err.contains("position"), "stderr: {err}");
 }
 
 #[test]
@@ -376,120 +400,19 @@ fn show_rejects_reflog_syntax() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
 
-    let (out, _, ok) = run(path, None, &["add", "-m", "note"]);
+    let (out, _, ok) = run(path, None, &["add", "doc", "note"]);
     assert!(ok);
-    let id = out.trim().to_owned();
+    let name = out.trim().to_owned();
 
-    let (_, err, ok) = run(path, None, &["show", &format!("{id}@{{yesterday}}")]);
+    let (_, err, ok) = run(
+        path,
+        None,
+        &["show", "doc", &format!("{name}@{{yesterday}}")],
+    );
     assert!(!ok, "reflog syntax should be rejected");
     assert!(err.contains("reflog"), "stderr: {err}");
-}
-
-#[test]
-fn list_by_commit_includes_position_notes_anchored_there() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(
-        path,
-        None,
-        &["add", "--path", "file.txt", "-L", "2,3", "-m", "positioned"],
-    );
-    assert!(ok);
-    let position_id = out.trim().to_owned();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "whole commit"]);
-    assert!(ok);
-    let commit_id = out.trim().to_owned();
-
-    let (out, err, ok) = run(path, None, &["list", "HEAD"]);
-    assert!(ok, "list HEAD failed: {err}");
-    assert!(
-        out.contains(&position_id[..8]),
-        "list HEAD should include the position note anchored at HEAD: {out}"
-    );
-    assert!(
-        out.contains(&commit_id[..8]),
-        "list HEAD should include the commit note: {out}"
-    );
-}
-
-#[test]
-fn list_json_emits_one_object_per_line() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let (out, _, ok) = run(path, None, &["add", "-m", "a note"]);
-    assert!(ok);
-    let id = out.trim().to_owned();
-
-    let (out, err, ok) = run(path, None, &["list", "--json"]);
-    assert!(ok, "list --json failed: {err}");
-    assert!(
-        out.contains(&format!("\"id\":\"{id}\"")),
-        "list --json: {out}"
-    );
-    assert!(out.contains("\"binding\":\"commit\""), "list --json: {out}");
-    assert!(out.contains("\"summary\":"), "list --json: {out}");
-}
-
-#[test]
-fn lines_accepts_git_log_forms_start_plus_count_and_embedded_path() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    // `10,+5`-style: start plus a count, rather than an explicit end.
-    let (out, err, ok) = run(
-        path,
-        None,
-        &["add", "--path", "file.txt", "-L", "2,+2", "-m", "count"],
-    );
-    assert!(ok, "add with start+count failed: {err}");
-    let id = out.trim().to_owned();
-    let (out, err, ok) = run(path, None, &["show", &id, "--json"]);
-    assert!(ok, "show --json failed: {err}");
-    assert!(
-        out.contains("\"lines\":{\"start\":2,\"end\":3}"),
-        "show --json output: {out}"
-    );
-
-    // A `:path` embedded in the `-L` token matching `--path` is accepted.
-    let (_, err, ok) = run(
-        path,
-        None,
-        &[
-            "add",
-            "--path",
-            "file.txt",
-            "-L",
-            "2,3:file.txt",
-            "-m",
-            "embedded path",
-        ],
-    );
-    assert!(ok, "add with embedded path failed: {err}");
-
-    // A `:path` embedded in the `-L` token that disagrees with `--path` is
-    // an error.
-    let (_, err, ok) = run(
-        path,
-        None,
-        &[
-            "add",
-            "--path",
-            "file.txt",
-            "-L",
-            "2,3:other.txt",
-            "-m",
-            "bad",
-        ],
-    );
-    assert!(!ok, "disagreeing paths should fail");
-    assert!(err.contains("disagree"), "stderr: {err}");
 }
 
 #[test]
@@ -497,6 +420,7 @@ fn worktree_add_and_show_project_uncommitted_content() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
 
     // Dirty the working tree without committing.
     std::fs::write(
@@ -510,67 +434,213 @@ fn worktree_add_and_show_project_uncommitted_content() {
         None,
         &[
             "add",
+            "doc",
+            "worktree note",
             "--path",
             "file.txt",
             "-L",
             "5,6",
-            "-m",
-            "worktree note",
             "--worktree",
         ],
     );
     assert!(ok, "add --worktree failed: {err}");
-    let id = out.trim().to_owned();
+    let name = out.trim().to_owned();
 
-    let (out, err, ok) = run(path, None, &["show", &id]);
+    let (out, err, ok) = run(path, None, &["show", "doc", &name, "--json"]);
     assert!(ok, "show failed: {err}");
-    assert!(out.contains("line five"), "show output: {out}");
+    assert!(out.contains("worktree note"), "show output: {out}");
 
-    let (out, err, ok) = run(path, None, &["show", &id, "--worktree"]);
+    let (out, err, ok) = run(path, None, &["show", "doc", &name, "--worktree"]);
     assert!(ok, "show --worktree failed: {err}");
     assert!(out.contains("current"), "show --worktree output: {out}");
+    assert!(out.contains("line five"), "show --worktree output: {out}");
 
-    // `--worktree` conflicts with a positional `<object>`.
     let (_, err, ok) = run(
         path,
         None,
-        &["add", "HEAD", "--path", "file.txt", "--worktree", "-m", "x"],
+        &[
+            "add",
+            "doc",
+            "x",
+            "--path",
+            "file.txt",
+            "--worktree",
+            "--at",
+            "HEAD",
+        ],
     );
-    assert!(!ok, "--worktree with <object> should fail");
+    assert!(!ok, "--worktree with --at should fail");
     assert!(
         err.contains("worktree") || err.contains("cannot be used"),
         "stderr: {err}"
     );
 }
 
+// ── the -L grammar, unchanged from before this phase ─────────────────────
+
 #[test]
-fn remove_accepts_multiple_ids_and_is_atomic_on_a_bad_one() {
+fn no_path_and_lines_together_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let (_, err, ok) = run(path, None, &["add", "doc", "bad", "-L", "1,2"]);
+    assert!(!ok);
+    assert!(err.contains("--path"), "stderr: {err}");
+    assert!(err.contains("-L"), "stderr: {err}");
+}
+
+#[test]
+fn lines_accepts_git_log_forms_start_plus_count_and_embedded_path() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let (out, err, ok) = run(
+        path,
+        None,
+        &["add", "doc", "count", "--path", "file.txt", "-L", "2,+2"],
+    );
+    assert!(ok, "add with start+count failed: {err}");
+    let name = out.trim().to_owned();
+    let (out, err, ok) = run(path, None, &["show", "doc", &name, "--json"]);
+    assert!(ok, "show --json failed: {err}");
+    assert!(
+        out.contains("\"lines\":{\"end\":3,\"start\":2}"),
+        "show --json output: {out}"
+    );
+
+    let (_, err, ok) = run(
+        path,
+        None,
+        &[
+            "add",
+            "doc",
+            "bad",
+            "--path",
+            "file.txt",
+            "-L",
+            "2,3:other.txt",
+        ],
+    );
+    assert!(!ok, "disagreeing paths should fail");
+    assert!(err.contains("disagree"), "stderr: {err}");
+}
+
+// ── the ref namespace is a plain argument, not hard-coded ────────────────
+
+#[test]
+fn prefix_selects_a_disjoint_store() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/example", "doc");
+
+    let (out, err, ok) = run(
+        path,
+        None,
+        &["--prefix", "refs/example", "add", "doc", "elsewhere"],
+    );
+    assert!(ok, "add under a custom prefix failed: {err}");
+    let name = out.trim().to_owned();
+
+    // The default prefix (`refs/anchors`) never published this kind, so it
+    // lists as empty rather than erroring — `list` reads the ref namespace
+    // directly and does not require a published schema to try.
+    let (out, err, ok) = run(path, None, &["list", "doc"]);
+    assert!(ok, "list under the default prefix failed: {err}");
+    assert_eq!(
+        out.trim(),
+        "",
+        "the default prefix should not see the custom one: {out}"
+    );
+
+    let (out, err, ok) = run(
+        path,
+        None,
+        &["--prefix", "refs/example", "show", "doc", &name],
+    );
+    assert!(ok, "show under a custom prefix failed: {err}");
+    assert!(out.contains("elsewhere"), "show output: {out}");
+}
+
+// ── documents the upstream-blocked equivalence gap ───────────────────────
+
+/// `DEVPLAN-boundary.md` Phase 3 opens with `git anchor add comment "some
+/// text"` being `git comment add "some text"` "by another name". Applied to
+/// the note document (`crates/gix-anchor/src/store.rs`, the kind
+/// `gix-comment` still publishes pre-Phase-2 under `refs/comments` as
+/// `notes`), the plan reasons that excluding `binding` and the two
+/// `Optional` fields (`parent`, `state`) leaves `body` and `created_at`,
+/// "only `body` is `Node::String`", so refusal comes down to `created_at`
+/// alone having no way to be filled.
+///
+/// That is not what the schema the running code actually publishes says.
+/// `Note::body` is `Vec<u8>`, and `facet-git-tree` special-cases any byte
+/// sequence to `Node::Bytes` before it ever reaches struct-field handling
+/// (`crates/facet-git-tree/src/schema/mod.rs`'s `is_byte_seq` check) — `body`
+/// is `Node::Bytes`, not `Node::String`. Consequence 1's positional-argument
+/// rule, as written, only ever matches `Node::String`
+/// (`crates/git-anchor/src/main.rs`'s `unique_string_field`), by design —
+/// `facet-git-tree` "has no separate 'text' leaf; `String` is it", and this
+/// phase does not re-litigate that scope to also accept `Bytes`. So the
+/// refusal here does not even reach `created_at`: zero fields qualify as the
+/// positional candidate at all, not because nothing can fill `created_at`
+/// specifically, but because nothing in the schema is `Node::String` in the
+/// first place. Both gaps stand between here and the equivalence Phase 3
+/// opens with; this test documents the one this code actually hits first.
+#[test]
+fn add_against_the_real_comment_kind_refuses_before_reaching_created_at() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
 
-    let (out, _, ok) = run(path, None, &["add", "-m", "one"]);
-    assert!(ok);
-    let id1 = out.trim().to_owned();
-    let (out, _, ok) = run(path, None, &["add", "--path", "file.txt", "-m", "two"]);
-    assert!(ok);
-    let id2 = out.trim().to_owned();
+    publish::<Note>(path, "refs/comments", "notes");
 
-    // One bad id among good ones: nothing gets removed.
-    let (out_before, _, _) = run(path, None, &["list"]);
-    let (_, err, ok) = run(path, None, &["remove", &id1, "not-a-real-id"]);
-    assert!(!ok, "remove with a bad id should fail atomically");
-    assert!(err.contains("no note matches"), "stderr: {err}");
-    let (out_after, _, _) = run(path, None, &["list"]);
-    assert_eq!(
-        out_before, out_after,
-        "a failed multi-remove must not remove anything"
+    let (_, err, ok) = run(
+        path,
+        None,
+        &["--prefix", "refs/comments", "add", "notes", "some text"],
     );
+    assert!(
+        !ok,
+        "git anchor add notes should refuse: no positional-fillable field exists"
+    );
+    assert!(
+        err.contains("does not accept a positional argument"),
+        "stderr: {err}"
+    );
+}
 
-    // Both good ids: both get removed.
-    let (_, err, ok) = run(path, None, &["remove", &id1, &id2]);
-    assert!(ok, "remove failed: {err}");
-    let (out, _, ok) = run(path, None, &["list"]);
-    assert!(ok);
-    assert_eq!(out.trim(), "", "both notes should be gone: {out}");
+/// The narrower claim Consequence 1 makes still holds once the positional
+/// argument is out of the picture entirely: `created_at` really is required
+/// and really has no `#[facet(default)]`, so even the `--json` escape hatch
+/// still needs a value supplied for it explicitly — this crate cannot invent
+/// one, by design (`DEVPLAN-boundary.md` rejects zero-filling it).
+#[test]
+fn add_against_the_real_comment_kind_via_json_still_needs_created_at() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    publish::<Note>(path, "refs/comments", "notes");
+
+    // Every field but `created_at` supplied explicitly, so the write's own
+    // refusal can only be about the one field this crate has no way to fill.
+    let (_, err, ok) = run(
+        path,
+        None,
+        &[
+            "--prefix",
+            "refs/comments",
+            "add",
+            "notes",
+            "--json",
+            "{\"body\": \"some text\", \"attachment\": null, \"parent\": null, \"state\": null}",
+        ],
+    );
+    assert!(!ok, "omitting created_at from --json should still refuse");
+    assert!(err.contains("created_at"), "stderr: {err}");
 }
