@@ -1,20 +1,16 @@
-//! `git-anchor`: a git external subcommand (`git anchor …`) that writes,
-//! reads, and removes entities of any kind published in a `gix-store`
-//! registry — it defines no document type of its own.
+//! `git-anchor`: a git external subcommand (`git anchor …`) that captures
+//! bindings and injects them into entities of any kind published in a
+//! `gix-store` registry — it defines no document type of its own.
 //!
-//! `add <kind>` requires `<kind>`'s published schema to embed
+//! `inject <kind>` requires `<kind>`'s published schema to embed
 //! [`gix_anchor::Binding`]'s shape (located by structural comparison, not by
-//! name): that field is always filled from the capture pipeline
-//! (`--at`/`--path`/`-L`/`--worktree`), never from user text. The one other
-//! remaining required field whose shape is `String` is filled from a
-//! positional argument when exactly one such field exists; otherwise, and for
-//! any kind whose document shape does not reduce this cleanly, `--json`
-//! supplies the whole document literally. `list`/`show`/`remove` work the
-//! same way for any kind, published schema or not read back as
-//! [`facet_value::Value`] rather than a compiled Rust type. `show`'s
-//! `@<rev>`/`--worktree` projection re-derives where a position binding sits
-//! elsewhere, exactly as it always did — it operates on the [`Binding`]
-//! extracted from the read entity, not on any document-specific field.
+//! name): that field is always filled from a previously [`create`](Command::Create)d
+//! binding, never from user text. `list`/`show`/`remove` work the same way
+//! for any kind, published schema or not, read back as [`facet_value::Value`]
+//! rather than a compiled Rust type. `show`'s `@<rev>`/`--worktree`
+//! projection re-derives where a position binding sits elsewhere, exactly as
+//! it always did — it operates on the [`Binding`] extracted from the read
+//! entity, not on any document-specific field.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -30,12 +26,14 @@ use gix_anchor::{
     Anchor, Binding, CommitIdentity, LineRange, NoHints, Projection, capture, capture_worktree,
     project, project_worktree, snippet,
 };
-use gix_store::{Layout, RefPath, RefPrefix, RefSegment, RepoStore, entity_name_under};
+use gix_store::{
+    DocumentBuilder, Layout, RefPath, RefPrefix, RefSegment, RepoStore, entity_name_under,
+};
 
 #[derive(Parser)]
 #[command(
     name = "git-anchor",
-    about = "Write entities of any registered kind",
+    about = "Capture bindings and inject them into entities of any registered kind",
     version
 )]
 struct Cli {
@@ -49,16 +47,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Add an entity of `<kind>`. `<kind>` must be anchorable (its published
-    /// schema embeds `Binding`'s shape) — this is `git anchor`'s reason to
-    /// exist, not an incidental restriction.
-    Add(AddArgs),
+    /// Capture a binding, writing its identity and hints objects. Advances
+    /// no ref and needs no registered kind.
+    Create(CreateArgs),
+    /// Write an entity of `<kind>` embedding a previously created binding.
+    /// `<kind>` must be anchorable (its published schema embeds `Binding`'s
+    /// shape) — this is `git anchor`'s reason to exist.
+    Inject(InjectArgs),
     /// List every entity of `<kind>`.
     #[command(visible_alias = "ls")]
     List(ListArgs),
     /// Show one entity of `<kind>` by its full entity name (as `list` or
-    /// `add` printed it). `@<rev>` projects a position binding onto another
-    /// revision; `--worktree` projects onto the working tree.
+    /// `inject` printed it). `@<rev>` projects a position binding onto
+    /// another revision; `--worktree` projects onto the working tree.
     Show(ShowArgs),
     /// Remove one or more entities of `<kind>`, by full entity name. Every
     /// name is checked to exist before any entity is removed.
@@ -66,18 +67,12 @@ enum Command {
     Remove(RemoveArgs),
 }
 
-/// Arguments for `add`.
+/// Arguments shared by capture: the revision/path/lines a binding names.
 #[derive(clap::Args)]
-struct AddArgs {
-    /// The kind to add an entity of.
-    kind: RefSegment,
-    /// Fills the kind's one remaining required `String` field. Conflicts
-    /// with `--json`, which supplies the whole document instead.
-    #[arg(conflicts_with = "json")]
-    text: Option<String>,
-    /// The revision the binding names (`Binding::Commit`), or that
-    /// `--path`/`-L` resolve a blob against (`Binding::Position`). Defaults
-    /// to `HEAD`. Conflicts with `--worktree`.
+struct CreateArgs {
+    /// The revision the binding names (whole-commit), or that `--path`/`-L`
+    /// resolve a blob against (position). Defaults to `HEAD`. Conflicts
+    /// with `--worktree`.
     #[arg(long, value_name = "REV", conflicts_with = "worktree")]
     at: Option<String>,
     /// Anchor a specific blob path instead of the revision itself. Resolved
@@ -98,10 +93,24 @@ struct AddArgs {
     /// with `--at`.
     #[arg(long, requires = "path", conflicts_with = "at")]
     worktree: bool,
+}
+
+/// Arguments for `inject`.
+#[derive(clap::Args)]
+struct InjectArgs {
+    /// The kind to write an entity of; must be anchorable.
+    kind: RefSegment,
+    /// Fills the kind's one remaining required `String` field. Conflicts
+    /// with `--json`, which supplies the whole document instead.
+    #[arg(conflicts_with = "json")]
+    text: Option<String>,
+    /// A previously captured binding, as printed by `git anchor create`.
+    #[arg(long, value_name = "ID")]
+    anchor: gix::ObjectId,
     /// A whole `facet_value::Value` JSON literal for the document — the
     /// escape hatch when no single positional argument can fill the kind's
     /// remaining required fields. The binding field is still injected from
-    /// the capture pipeline, overriding anything this literal sets there.
+    /// `--anchor`, overriding anything this literal sets there.
     #[arg(long, value_name = "VALUE")]
     json: Option<String>,
 }
@@ -144,13 +153,8 @@ struct RemoveArgs {
 
 fn main() -> Result<()> {
     // Install signal handlers before any lock is taken, so an interrupted
-    // write cleans up its per-ref lock file (a gix_tempfile) instead of
-    // leaving a stale one that wedges the ref. grace_count 0 → the first
-    // SIGINT/SIGTERM cleans up and exits. (A SIGKILL or power loss can still
-    // orphan a lock — nothing short of pid-aware lock breaking covers that.)
-    //
-    // SAFETY: the interrupt callback runs in a signal handler and does nothing
-    // — no allocation, no locks — as required.
+    // write releases its per-ref lock file instead of wedging the ref.
+    // SAFETY: the callback runs in a signal handler and does nothing.
     #[allow(unsafe_code)]
     unsafe {
         gix::interrupt::init_handler(0, || {})?;
@@ -166,7 +170,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         None => cmd_kinds(&store)?,
-        Some(Command::Add(args)) => cmd_add(&repo, &store, args)?,
+        Some(Command::Create(args)) => cmd_create(&repo, args)?,
+        Some(Command::Inject(args)) => cmd_inject(&repo, &store, args)?,
         Some(Command::List(args)) => cmd_list(&store, &args.kind, args.json)?,
         Some(Command::Show(args)) => cmd_show(&repo, &store, args)?,
         Some(Command::Remove(args)) => cmd_remove(&store, &args.kind, &args.names)?,
@@ -196,19 +201,32 @@ fn cmd_kinds(store: &RepoStore<'_>) -> Result<()> {
     Ok(())
 }
 
-/// `add`: locate the binding field by reflection, fill it from the capture
-/// pipeline, fill the one remaining required `String` field (if any) from
-/// `<text>`, default every `Optional` field to absent, and refuse if
-/// anything required is still unfilled — unless `--json` supplied the whole
-/// document, in which case only the binding field is ever overridden.
-fn cmd_add(repo: &gix::Repository, store: &RepoStore<'_>, args: AddArgs) -> Result<()> {
-    let AddArgs {
-        kind,
-        text,
+/// `create`: capture a binding and write it to the repository's object
+/// database. Advances no ref; the printed id is content-addressed, so
+/// capturing the same coordinates twice prints the same id.
+fn cmd_create(repo: &gix::Repository, args: CreateArgs) -> Result<()> {
+    let CreateArgs {
         at,
         path,
         lines,
         worktree,
+    } = args;
+    let binding = build_binding(repo, at, path, lines, worktree)?;
+    let id = binding.serialize_into(repo)?;
+    println!("{id}");
+    Ok(())
+}
+
+/// `inject`: locate the binding field by reflection, fill it from
+/// `--anchor`, fill the one remaining required `String` field (if any) from
+/// `<text>`, default every `Optional` field to absent, and refuse if
+/// anything required is still unfilled — unless `--json` supplied the whole
+/// document, in which case only the binding field is ever overridden.
+fn cmd_inject(repo: &gix::Repository, store: &RepoStore<'_>, args: InjectArgs) -> Result<()> {
+    let InjectArgs {
+        kind,
+        text,
+        anchor,
         json,
     } = args;
 
@@ -220,50 +238,38 @@ fn cmd_add(repo: &gix::Repository, store: &RepoStore<'_>, args: AddArgs) -> Resu
     let binding_field_name = binding_field(&schema)?;
     let fields = struct_fields(&schema)?;
 
-    let binding = build_binding(repo, at, path, lines, worktree)?;
-    let target = binding.target();
+    let binding =
+        Binding::deserialize(&anchor, repo).with_context(|| format!("reading binding {anchor}"))?;
 
-    let mut value: Value = match &json {
-        Some(raw) => facet_json::from_str(raw).context("parsing --json value")?,
-        None => VObject::new().into(),
-    };
-    let obj = value
-        .as_object_mut()
-        .ok_or_else(|| anyhow!("--json value must be a JSON object"))?;
-    obj.insert(binding_field_name.clone(), binding_to_value(&binding)?);
-
-    if json.is_none() {
-        if let Some(text) = &text {
-            let field = unique_string_field(&schema, fields, &binding_field_name)
-                .with_context(|| format!("kind {kind} does not accept a positional argument"))?;
-            obj.insert(field, Value::from(text.as_str()));
-        }
-        for (name, field) in fields {
-            if name == &binding_field_name || obj.contains_key(name.as_str()) || field.has_default {
-                continue;
-            }
-            if matches!(resolve(&schema, &field.node), Some(Node::Optional(_))) {
-                obj.insert(name.clone(), Value::NULL);
-            }
-        }
-        let missing: Vec<&str> = fields
-            .iter()
-            .filter(|(name, field)| {
-                name.as_str() != binding_field_name
-                    && !field.has_default
-                    && !obj.contains_key(name.as_str())
-            })
-            .map(|(name, _)| name.as_str())
-            .collect();
-        if !missing.is_empty() {
-            bail!(
-                "kind {kind} has required field(s) with no way to fill from the command \
-                 line: {}; supply the whole document with --json",
-                missing.join(", ")
-            );
+    // Every unset `Optional`-shaped field defaults to absent; a real value
+    // supplied below (json, text, or the binding) simply overwrites it.
+    let mut builder = DocumentBuilder::for_schema(&schema)?;
+    for (name, field) in fields {
+        if !field.has_default && matches!(resolve(&schema, &field.node), Some(Node::Optional(_))) {
+            builder.set(name, Value::NULL)?;
         }
     }
 
+    if let Some(raw) = &json {
+        let value: Value = facet_json::from_str(raw).context("parsing --json value")?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| anyhow!("--json value must be a JSON object"))?;
+        for (name, value) in obj.iter() {
+            builder.set(name.as_str(), value.clone())?;
+        }
+    } else if let Some(text) = &text {
+        let field = unique_string_field(&schema, fields, &binding_field_name)
+            .with_context(|| format!("kind {kind} does not accept a positional argument"))?;
+        builder.set(&field, text.as_str())?;
+    }
+    builder.set(&binding_field_name, binding_to_value(&binding)?)?;
+
+    let value = builder
+        .build()
+        .with_context(|| format!("kind {kind}: fill remaining required field(s) with --json"))?;
+
+    let target = binding.target();
     let group = RefPath::from(RefSegment::new(target.to_string()).expect("hex oid is valid"));
     let message = format!("{kind} {target}");
     let commit = dynamic
@@ -359,7 +365,7 @@ fn cmd_remove(store: &RepoStore<'_>, kind: &RefSegment, names: &[RefPath]) -> Re
     Ok(())
 }
 
-/// Build the [`Binding`] `add` injects: a position (`--path`/`-L`, at a
+/// Build the [`Binding`] `create` captures: a position (`--path`/`-L`, at a
 /// revision or, with `--worktree`, on-disk) or the bare revision itself,
 /// defaulting to `HEAD`.
 fn build_binding(
@@ -369,8 +375,6 @@ fn build_binding(
     lines: Option<LinesArg>,
     worktree: bool,
 ) -> Result<Binding> {
-    // Reconcile `--path` with a path embedded in `-L START,END:path`: either
-    // may supply it, but not two disagreeing values.
     let has_lines = lines.is_some();
     let lines_path = lines.as_ref().and_then(|l| l.path.clone());
     let raw_path = match (path, lines_path) {
@@ -425,16 +429,11 @@ fn build_binding(
 
 /// Encode `binding` as a [`Value`] conforming to its own schema.
 ///
-/// Not `facet_value::to_value`: that goes through `facet-format`'s generic
-/// event serializer, which has no notion of `facet-git-tree`'s byte-sequence
-/// leaf (`Oid`'s `[u8; 20]`, `#[facet(transparent)]`) and emits a plain
-/// array of numbers for it — a `Value` that then fails to write under a
-/// schema whose matching field is `Node::Bytes`. Round-tripping through the
-/// tree codec instead — the same encode/decode pair every stored entity
-/// already goes through — sidesteps that gap entirely: the write side
-/// already handles byte sequences correctly, and reading the result back
-/// with the schema in hand yields exactly the `Value` a schema-conformant
-/// write needs, in memory, no repository involved.
+/// Not `facet_value::to_value`: its generic serializer has no notion of
+/// `facet-git-tree`'s byte-sequence leaf (`Oid`'s `#[facet(transparent)]`
+/// `[u8; 20]`), so it emits a plain number array that then fails to write
+/// under a schema expecting `Node::Bytes`. Round-tripping through the tree
+/// codec instead sidesteps the gap.
 fn binding_to_value(binding: &Binding) -> Result<Value> {
     let store = ObjectStore::default();
     let root = facet_git_tree::serialize_into(binding, &store).context("encoding the binding")?;
@@ -442,47 +441,15 @@ fn binding_to_value(binding: &Binding) -> Result<Value> {
     deserialize_value_with_schema(&root, &schema, &store).context("re-reading the binding")
 }
 
-/// The inverse of [`binding_to_value`]: decode a [`Value`] already known to
-/// conform to `Binding`'s schema (it came off a schema-directed read) back
-/// into a real [`Binding`]. Not `facet_value::from_value`, for the same
-/// reason `to_value` is unusable on the way in — its generic deserializer
-/// expects a `[u8; N]`-shaped field to arrive as a JSON-style array, not the
-/// `Value::Bytes` a schema-directed read actually produces for one. Writing
-/// the value back out under the schema (which does understand
-/// `Node::Bytes`) and reading the result with the ordinary typed decoder
-/// sidesteps the gap the same way.
+/// The inverse of [`binding_to_value`]: a [`Value`] already known to conform
+/// to `Binding`'s schema, decoded back into a real [`Binding`] by the same
+/// round trip in reverse.
 fn value_to_binding(value: &Value) -> Result<Binding> {
     let store = ObjectStore::default();
     let schema = schema_of::<Binding>().context("Binding's own schema")?;
     let root = serialize_value_with_schema(value, &schema, &store)
         .context("re-encoding the binding field")?;
     facet_git_tree::deserialize(&root, &store).context("decoding the binding field")
-}
-
-/// The one field of `schema`'s root struct whose shape structurally equals
-/// [`Binding`]'s own — `DEVPLAN-boundary.md`'s "Locating the binding field by
-/// reflection". Refuses when zero or more than one field matches.
-fn binding_field(schema: &Schema) -> Result<String> {
-    let canonical = schema_of::<Binding>().context("Binding's own schema")?;
-    let canonical_root =
-        resolve(&canonical, &canonical.root).context("Binding's root does not resolve")?;
-    let fields = struct_fields(schema)?;
-    let matches: Vec<&String> = fields
-        .iter()
-        .filter(|(_, field)| resolve(schema, &field.node) == Some(canonical_root))
-        .map(|(name, _)| name)
-        .collect();
-    match matches.as_slice() {
-        [name] => Ok((*name).clone()),
-        [] => bail!("not anchorable: no field in its schema matches Binding's shape"),
-        many => bail!(
-            "ambiguously anchorable: fields {} all match Binding's shape",
-            many.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    }
 }
 
 /// `schema`'s root, resolved to its struct fields.
@@ -502,8 +469,30 @@ fn resolve<'s>(schema: &'s Schema, node: &'s Node) -> Option<&'s Node> {
     }
 }
 
+/// The one field of `schema`'s root struct whose shape structurally equals
+/// [`Binding`]'s own. Refuses when zero or more than one field matches.
+fn binding_field(schema: &Schema) -> Result<String> {
+    let canonical = schema_of::<Binding>().context("Binding's own schema")?;
+    let canonical_root =
+        resolve(&canonical, &canonical.root).context("Binding's root does not resolve")?;
+    let fields = struct_fields(schema)?;
+    let matches: Vec<&String> = fields
+        .iter()
+        .filter(|(_, field)| resolve(schema, &field.node) == Some(canonical_root))
+        .map(|(name, _)| name)
+        .collect();
+    match matches.as_slice() {
+        [name] => Ok((*name).clone()),
+        [] => bail!("not anchorable: no field in its schema matches Binding's shape"),
+        many => bail!(
+            "ambiguously anchorable: fields {} all match Binding's shape",
+            join(many)
+        ),
+    }
+}
+
 /// The one field, among `fields` excluding `binding_field`, that is required
-/// (not `Optional`, no default) and shaped `Node::String` — `add`'s
+/// (not `Optional`, no default) and shaped `Node::String` — `inject`'s
 /// positional argument fills exactly this field, when exactly one exists.
 fn unique_string_field(
     schema: &Schema,
@@ -515,7 +504,6 @@ fn unique_string_field(
         .filter(|(name, field)| {
             name.as_str() != binding_field
                 && !field.has_default
-                && !matches!(resolve(schema, &field.node), Some(Node::Optional(_)))
                 && matches!(resolve(schema, &field.node), Some(Node::String))
         })
         .map(|(name, _)| name)
@@ -526,12 +514,18 @@ fn unique_string_field(
         many => bail!(
             "ambiguous: {} candidate String fields ({})",
             many.len(),
-            many.iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            join(many)
         ),
     }
+}
+
+/// `names`, comma-joined.
+fn join(names: &[&String]) -> String {
+    names
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// An entity as stored, human- or machine-readable.
@@ -601,10 +595,7 @@ fn binding_kind(binding: &Binding) -> &'static str {
 }
 
 /// Split a `show` argument into an entity-name prefix and an optional
-/// `@<rev>` suffix. Entity names this crate mints are hex-oid path segments,
-/// which never contain `@`, so a plain split is exact. `@{…}` (git's
-/// reflog/date syntax) is rejected outright rather than mangled into a
-/// revision lookup that would just fail confusingly downstream.
+/// `@<rev>` suffix. `@{…}` (git's reflog/date syntax) is rejected outright.
 fn split_show_spec(spec: &str) -> Result<(&str, Option<&str>)> {
     let Some((name, rev)) = spec.split_once('@') else {
         return Ok((spec, None));
@@ -665,10 +656,8 @@ fn parse_lines_arg(raw: &str) -> std::result::Result<LinesArg, String> {
     })
 }
 
-/// Prefix a `--path` (or `-L`'s embedded path) value with the path from the
-/// repository root to the current directory, so it behaves like an ordinary
-/// git pathspec — resolved relative to cwd, not the repo root — the same
-/// convention `git add <path>` uses.
+/// Resolve `--path` (or `-L`'s embedded path) relative to cwd, like any git
+/// pathspec — the same convention `git add <path>` uses.
 fn cwd_relative_path(repo: &gix::Repository, path: &str) -> Result<String> {
     let prefix = repo
         .prefix()
@@ -681,10 +670,7 @@ fn cwd_relative_path(repo: &gix::Repository, path: &str) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-/// The normal (non-`.`) path components of `path`, as plain strings —
-/// `cwd_relative_path`'s helper, applied to both the repo prefix and the
-/// user-supplied path so the joined result is a clean, forward-slash
-/// pathspec regardless of the host platform's separator.
+/// `path`'s normal (non-`.`) components, as plain strings.
 fn path_components(path: &Path) -> impl Iterator<Item = String> + '_ {
     path.components().filter_map(|component| match component {
         std::path::Component::CurDir => None,
