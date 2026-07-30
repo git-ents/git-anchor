@@ -80,17 +80,20 @@ impl Projection {
     /// Takes `anchor`: [`Self::Relocated`] and [`Self::Outdated`] each carry
     /// only the *destination* path, and telling a rename (a new [`Position`])
     /// apart from an in-place edit (the same one) means comparing it against
-    /// the anchor's own [`Anchor::path`]. That comparison is exact, not an
-    /// approximation -- [`project_exact`]'s tree diff, with rename tracking,
-    /// already decided the destination path precisely when it built `self`,
-    /// so this recovers that decision rather than guessing at it. Callers
-    /// should use this method rather than comparing paths themselves.
+    /// the anchor's own `identity.path`. That comparison is exact,
+    /// not an approximation -- [`project_exact`]'s tree diff, with rename
+    /// tracking, already decided the destination path precisely when it
+    /// built `self`, so this recovers that decision rather than guessing at
+    /// it. Callers should use this method rather than comparing paths
+    /// themselves.
     #[must_use]
     pub fn axes(&self, anchor: &Anchor) -> (Position, Content) {
         match self {
             Self::Current => (Position::Same, Content::Intact),
-            Self::Relocated { path, .. } => (Position::of(path, &anchor.path), Content::Intact),
-            Self::Outdated { path } => (Position::of(path, &anchor.path), Content::Edited),
+            Self::Relocated { path, .. } => {
+                (Position::of(path, &anchor.identity.path), Content::Intact)
+            }
+            Self::Outdated { path } => (Position::of(path, &anchor.identity.path), Content::Edited),
             Self::Deleted => (Position::Lost, Content::None),
         }
     }
@@ -290,7 +293,7 @@ pub fn project_candidates(
     let primary = project_exact_onto(repo, anchor, &target_tree)?;
 
     let (needle, lines) = match &primary {
-        Projection::Current => (ObjectId::from(anchor.blob), anchor.lines),
+        Projection::Current => (ObjectId::from(anchor.hints.blob), anchor.identity.lines),
         Projection::Relocated { path, lines } => {
             let id = target_tree
                 .lookup_entry_by_path(path)
@@ -305,7 +308,7 @@ pub fn project_candidates(
         Projection::Outdated { .. } | Projection::Deleted => return Ok(vec![primary]),
     };
 
-    let anchor_blob = ObjectId::from(anchor.blob);
+    let anchor_blob = ObjectId::from(anchor.hints.blob);
     let mut candidates: Vec<(String, Projection)> = target_tree
         .traverse()
         .breadthfirst
@@ -315,7 +318,7 @@ pub fn project_candidates(
         .filter(|entry| entry.mode.is_blob() && entry.oid == needle)
         .map(|entry| {
             let path = entry.filepath.to_str_lossy().into_owned();
-            let projection = if path == anchor.path && entry.oid == anchor_blob {
+            let projection = if path == anchor.identity.path && entry.oid == anchor_blob {
                 Projection::Current
             } else {
                 Projection::Relocated {
@@ -342,11 +345,11 @@ fn project_exact_onto(
     anchor: &Anchor,
     target_tree: &gix::Tree<'_>,
 ) -> Result<Projection> {
-    let anchor_blob = ObjectId::from(anchor.blob);
-    let anchor_commit_id = ObjectId::from(anchor.commit);
+    let anchor_blob = ObjectId::from(anchor.hints.blob);
+    let anchor_commit_id = ObjectId::from(anchor.identity.genesis);
 
     if let Some(entry) = target_tree
-        .lookup_entry_by_path(&anchor.path)
+        .lookup_entry_by_path(&anchor.identity.path)
         .map_err(|error| Error::Object(error.to_string()))?
         && entry.mode().is_blob()
         && entry.object_id() == anchor_blob
@@ -376,7 +379,9 @@ fn project_exact_onto(
     let mut destination: Option<(String, ObjectId, bool)> = None;
     for change in changes {
         match change {
-            Change::Deletion { location, .. } if location.as_bytes() == anchor.path.as_bytes() => {
+            Change::Deletion { location, .. }
+                if location.as_bytes() == anchor.identity.path.as_bytes() =>
+            {
                 return Ok(Projection::Deleted);
             }
             Change::Modification {
@@ -384,8 +389,8 @@ fn project_exact_onto(
                 id,
                 entry_mode,
                 ..
-            } if location.as_bytes() == anchor.path.as_bytes() => {
-                destination = Some((anchor.path.clone(), id, entry_mode.is_blob()));
+            } if location.as_bytes() == anchor.identity.path.as_bytes() => {
+                destination = Some((anchor.identity.path.clone(), id, entry_mode.is_blob()));
                 break;
             }
             Change::Rewrite {
@@ -395,7 +400,7 @@ fn project_exact_onto(
                 entry_mode,
                 copy: false,
                 ..
-            } if source_location.as_bytes() == anchor.path.as_bytes() => {
+            } if source_location.as_bytes() == anchor.identity.path.as_bytes() => {
                 destination = Some((
                     location.to_str_lossy().into_owned(),
                     id,
@@ -412,7 +417,7 @@ fn project_exact_onto(
         // so the anchor itself is broken.
         return Err(Error::MissingPath {
             commit: anchor_commit_id,
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
         });
     };
     if !is_blob {
@@ -423,14 +428,14 @@ fn project_exact_onto(
         // exactly where it was.
         return Ok(Projection::Relocated {
             path,
-            lines: anchor.lines,
+            lines: anchor.identity.lines,
         });
     }
-    let lines = match anchor.lines {
+    let lines = match anchor.identity.lines {
         None => None,
         Some(range) => {
             let new = read_blob(repo, blob)?;
-            match map_range(&anchor.content, &new, range) {
+            match map_range(&anchor.hints.content, &new, range) {
                 Some(mapped) => Some(mapped),
                 None => return Ok(Projection::Outdated { path }),
             }
@@ -440,15 +445,15 @@ fn project_exact_onto(
 }
 
 /// Project `anchor` onto `target` by fuzzy-matching `anchor`'s retained
-/// `context` (`anchor.retention`) against `target`'s version of
-/// `anchor.path`, for use once `anchor`'s commit no longer exists and
+/// `hints.context` (`anchor.retention`) against `target`'s version of
+/// `identity.path`, for use once `anchor`'s commit no longer exists and
 /// [`project_exact`] can no longer diff against its tree.
 ///
-/// Looks up `anchor.path` in `target`'s tree directly (no rename tracking is
-/// possible without the anchor commit's tree, so a genuine rename reports
+/// Looks up `identity.path` in `target`'s tree directly (no rename tracking
+/// is possible without the anchor commit's tree, so a genuine rename reports
 /// [`Projection::Deleted`] here, same as a real deletion); a whole-file
-/// anchor (`anchor.lines` is `None`) survives any edit at that path, same as
-/// [`project_exact`]. For a line-range anchor, every contiguous window of
+/// anchor (`identity.lines` is `None`) survives any edit at that path, same
+/// as [`project_exact`]. For a line-range anchor, every contiguous window of
 /// the target file's lines the same length as `context` is scored by how
 /// many lines match `context` exactly; the best-scoring window (at least
 /// half its lines matching) is accepted and the anchored sub-range is mapped
@@ -465,30 +470,30 @@ pub fn project_from_context(
         .tree()
         .map_err(|error| Error::Object(error.to_string()))?;
     let Some(entry) = target_tree
-        .lookup_entry_by_path(&anchor.path)
+        .lookup_entry_by_path(&anchor.identity.path)
         .map_err(|error| Error::Object(error.to_string()))?
     else {
         return Ok(Projection::Deleted);
     };
     if !entry.mode().is_blob() {
         return Ok(Projection::Outdated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
         });
     }
-    let Some(range) = anchor.lines else {
+    let Some(range) = anchor.identity.lines else {
         return Ok(Projection::Relocated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
             lines: None,
         });
     };
 
     let data = read_blob(repo, entry.object_id())?;
     let target_lines: Vec<&[u8]> = data.lines_with_terminator().collect();
-    let context_lines: Vec<&[u8]> = anchor.context.lines_with_terminator().collect();
+    let context_lines: Vec<&[u8]> = anchor.hints.context.lines_with_terminator().collect();
     let window = context_lines.len();
     if window == 0 || window > target_lines.len() {
         return Ok(Projection::Outdated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
         });
     }
 
@@ -512,7 +517,7 @@ pub fn project_from_context(
             .is_some_and(|doubled| doubled >= window)
     }) else {
         return Ok(Projection::Outdated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
         });
     };
 
@@ -520,13 +525,13 @@ pub fn project_from_context(
     let range_len = range.end.saturating_sub(range.start).saturating_add(1);
     let Ok(start) = u64::try_from(start) else {
         return Ok(Projection::Outdated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
         });
     };
     let mapped_start = start.saturating_add(margin_before).saturating_add(1);
     let mapped_end = mapped_start.saturating_add(range_len).saturating_sub(1);
     Ok(Projection::Relocated {
-        path: anchor.path.clone(),
+        path: anchor.identity.path.clone(),
         lines: Some(LineRange {
             start: mapped_start,
             end: mapped_end,
@@ -542,7 +547,7 @@ pub fn project_from_context(
 ///
 /// There is no commit on the target side to diff trees against, so rename
 /// following degrades exactly as [`project_from_context`]'s does
-/// (`anchor.working-tree`): only `anchor.path` itself is consulted, and a
+/// (`anchor.working-tree`): only `identity.path` itself is consulted, and a
 /// file that moved on disk reports [`Projection::Deleted`] the same as a
 /// removed one. The line mapping itself never degrades: the embedded
 /// content makes the exact blob diff [`project_exact`] uses available even
@@ -588,7 +593,7 @@ pub fn project_worktree(
 ) -> Result<Projection> {
     let outdated = || {
         Ok(Projection::Outdated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
         })
     };
     let owned;
@@ -596,7 +601,7 @@ pub fn project_worktree(
         Some(bytes) => bytes,
         None => {
             let workdir = repo.workdir().ok_or(Error::NoWorkingTree)?;
-            let file = workdir.join(&anchor.path);
+            let file = workdir.join(&anchor.identity.path);
             let Ok(metadata) = std::fs::metadata(&file) else {
                 return Ok(Projection::Deleted);
             };
@@ -609,20 +614,20 @@ pub fn project_worktree(
             &owned
         }
     };
-    if bytes == anchor.content.as_slice() {
+    if bytes == anchor.hints.content.as_slice() {
         // Byte equality is blob-id equality: the exact anchored blob still
         // sits at the anchored path.
         return Ok(Projection::Current);
     }
-    let Some(range) = anchor.lines else {
+    let Some(range) = anchor.identity.lines else {
         return Ok(Projection::Relocated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
             lines: None,
         });
     };
-    match map_range(&anchor.content, bytes, range) {
+    match map_range(&anchor.hints.content, bytes, range) {
         Some(lines) => Ok(Projection::Relocated {
-            path: anchor.path.clone(),
+            path: anchor.identity.path.clone(),
             lines: Some(lines),
         }),
         None => outdated(),
@@ -1018,7 +1023,7 @@ mod tests {
     fn with_missing_commit(anchor: &Anchor) -> Anchor {
         let mut forged = anchor.clone();
         let fake = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
-        forged.commit = fake.into();
+        forged.identity.genesis = fake.into();
         forged
     }
 

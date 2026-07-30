@@ -18,9 +18,9 @@
 //! - `anchor.definition` — [`Anchor`] and [`capture`]'s validation.
 //! - `anchor.immutable` — no mutating API exists; [`snippet`] derives the
 //!   anchored text at read time; the commit id is plain data.
-//! - `anchor.retention` — [`Anchor::content`] and [`Anchor::context`] are
-//!   ordinary blob tree entries in the anchor's own serialized tree, never
-//!   a gitlink.
+//! - `anchor.retention` — [`AnchorHints::content`] and [`AnchorHints::context`]
+//!   are ordinary blob tree entries in the anchor's own serialized tree,
+//!   never a gitlink.
 //! - `anchor.projection` — [`project`] / [`project_exact`] and the
 //!   four-outcome [`Projection`] taxonomy.
 //! - `anchor.fuzzy-fallback` — [`project_from_context`], which [`project`]
@@ -109,8 +109,13 @@ mod oid;
 mod projection;
 mod util;
 
-pub use anchor::{Anchor, LineRange, capture, capture_worktree, snippet};
-pub use binding::{Binding, EvalState, Validity, revalidate};
+pub use anchor::{
+    Anchor, AnchorHints, AnchorIdentity, LineRange, capture, capture_worktree, snippet,
+};
+pub use binding::{
+    Binding, CommitIdentity, DeltaHints, DeltaIdentity, EvalState, HybridIdentity, NoHints,
+    TreeHints, TreeIdentity, Validity, revalidate,
+};
 pub use diff::{TreeChange, diff_trees};
 pub use error::{Error, Result};
 pub use oid::Oid;

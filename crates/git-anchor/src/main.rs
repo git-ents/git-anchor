@@ -27,8 +27,8 @@ use facet_git_tree::{
 };
 use facet_value::{VObject, Value};
 use gix_anchor::{
-    Anchor, Binding, LineRange, Projection, capture, capture_worktree, project, project_worktree,
-    snippet,
+    Anchor, Binding, CommitIdentity, LineRange, NoHints, Projection, capture, capture_worktree,
+    project, project_worktree, snippet,
 };
 use gix_store::{Layout, RefPath, RefPrefix, RefSegment, RepoStore, entity_name_under};
 
@@ -414,7 +414,10 @@ fn build_binding(
                 })?
                 .detach();
             Ok(Binding::Commit {
-                commit: commit.into(),
+                identity: CommitIdentity {
+                    commit: commit.into(),
+                },
+                hints: NoHints {},
             })
         }
     }

@@ -1,8 +1,11 @@
-//! [`Anchor`] itself: identity, embedded retention, and capture.
+//! [`Anchor`]: identity, retained hints, capture, and the anchor id.
 //!
-//! Spec coverage: `anchor.definition`, `anchor.immutable`, `anchor.retention`.
+//! Spec coverage: `anchor.definition`, `anchor.identity`, `anchor.immutable`,
+//! `anchor.retention`.
 
 use facet::Facet;
+use facet_git_tree::ObjectStore;
+use gix::ObjectId;
 use gix::bstr::ByteSlice as _;
 
 use crate::error::{Error, Result};
@@ -28,40 +31,52 @@ pub struct LineRange {
 }
 
 /// How many lines of surrounding source [`capture`] retains on each side of
-/// an anchored range as `context` — enough for
-/// [`crate::project_from_context`]'s line-window scan to recognize the
-/// anchored lines' neighborhood even after they themselves moved a little,
-/// without dragging in unrelated parts of a large file.
+/// an anchored range as [`AnchorHints::context`].
 pub(crate) const CONTEXT_MARGIN: u64 = 3;
 
+/// An anchor's non-derivable coordinates (`anchor.definition`): the commit it
+/// was captured against, its path, and its line range. Nothing else belongs
+/// here — [`Anchor::id`] is the content hash of this alone (`anchor.identity`).
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct AnchorIdentity {
+    /// The commit this anchor was captured against, recorded on a
+    /// best-effort basis: nothing keeps it reachable, so it may already be
+    /// gone by the time the anchor is read back.
+    /// [`crate::project_exact`] needs it to still exist;
+    /// [`crate::project_from_context`] does not.
+    pub genesis: Oid,
+    /// The repository-relative path of the anchored file at `genesis`.
+    pub path: String,
+    /// The anchored lines, or `None` for a whole-file anchor.
+    pub lines: Option<LineRange>,
+}
+
+/// Retained material (`anchor.retention`): derivable from [`AnchorIdentity`],
+/// never read by [`Anchor::id`].
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct AnchorHints {
+    /// The anchored blob's object id — derivable by reading `identity`'s
+    /// tree, retained so projection need not re-derive it on every call.
+    pub blob: Oid,
+    /// The anchored blob's full bytes, embedded verbatim and serialized as a
+    /// storage leaf blob.
+    pub content: Vec<u8>,
+    /// A window of up to [`CONTEXT_MARGIN`] lines on either side of the
+    /// anchored range (or the whole file, for a whole-file anchor), for
+    /// [`crate::project_from_context`] to fuzzy-match once `identity.genesis`
+    /// is gone.
+    pub context: Vec<u8>,
+}
+
 /// A durable pointer into source: authoritative at creation
-/// (`anchor.immutable`) and never mutated afterward — every function that
-/// takes one borrows it immutably, and projecting onto another commit
-/// ([`crate::project`]) only ever produces a new [`crate::Projection`], never
-/// a changed `Anchor`.
+/// (`anchor.immutable`) and never mutated — every function taking one
+/// borrows it immutably, and [`crate::project`] only ever produces a new
+/// [`crate::Projection`], never a changed `Anchor`.
 ///
-/// `commit` and `blob` identify exactly what was captured
-/// (`anchor.definition`); `content` and `context` are the retained copies
-/// (`anchor.retention`) that make the anchor durable — `content` is the
-/// anchored blob's own bytes (so writing it into a store reproduces `blob`'s
-/// object id exactly: content addressing makes "referenced rather than
-/// copied" a fact about the bytes, not extra machinery), and `context` is a
-/// small window around the anchored range, captured fresh, that
-/// [`crate::project_from_context`] falls back to once `commit` itself has
-/// been garbage collected. Neither is ever recomputed from the other after
-/// capture: the anchored *text* ([`snippet`]) is always re-derived from
-/// `content` and `lines` at read time rather than cached a third time.
-///
-/// `commit` is recorded on a best-effort basis only (`anchor.retention`):
-/// nothing in this crate keeps it reachable, so it may already be gone by
-/// the time the anchor is read back — that is exactly the case
-/// [`crate::project_from_context`] exists for.
-///
-/// Serializing an `Anchor` (`facet_git_tree::serialize_into`) writes
-/// `content` and `context` as ordinary blob tree entries alongside the
-/// identity fields, in the same tree — never a gitlink, which names a commit
-/// in another repository and would keep nothing reachable
-/// (`anchor.retention`).
+/// `identity` and `hints` are sibling subtrees: `identity` is
+/// [`AnchorIdentity`], `hints` is [`AnchorHints`]. Serializing an `Anchor`
+/// writes both as ordinary tree entries — `hints`' blobs never a gitlink,
+/// which would keep nothing reachable (`anchor.retention`).
 ///
 /// # Examples
 ///
@@ -87,41 +102,53 @@ pub(crate) const CONTEXT_MARGIN: u64 = 3;
 /// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", Some(LineRange { start: 3, end: 4 }))
 ///     .expect("capture");
 ///
-/// // The embedded content is retained as a storage leaf blob (still a
-/// // normal blob entry, never a gitlink).
+/// // The embedded content is retained as a storage leaf blob under `hints`
+/// // (still a normal blob entry, never a gitlink).
 /// let (root, store) = serialize(&anchor).expect("serialize");
 /// let (kind, oid) = {
-///     let entries = store.get_tree(&root).expect("tree");
-///     let entry = entries.iter().find(|e| e.filename == "content").expect("content entry");
+///     let hints = store.get_tree(&root).expect("tree");
+///     let hints_entry = hints.iter().find(|e| e.filename == "hints").expect("hints entry");
+///     let hints_entries = store.get_tree(&hints_entry.oid).expect("hints tree");
+///     let entry = hints_entries.iter().find(|e| e.filename == "content").expect("content entry");
 ///     (entry.mode.kind(), entry.oid)
 /// };
 /// assert_eq!(kind, EntryKind::Blob, "never a gitlink");
-/// assert_ne!(oid, gix::ObjectId::from(anchor.blob));
+/// assert_ne!(oid, gix::ObjectId::from(anchor.hints.blob));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Anchor {
-    /// The commit `self` was captured against, recorded on a best-effort
-    /// basis: nothing keeps it reachable, so it may be gone (garbage
-    /// collected) by the time the anchor is read back.
-    /// [`crate::project_exact`] needs it to still exist;
-    /// [`crate::project_from_context`] does not.
-    pub commit: Oid,
-    /// The repository-relative path of the anchored file at `commit`.
-    pub path: String,
-    /// The object id of the anchored file's blob at [`Anchor::commit`] — an
-    /// integrity check and the fast path for "has this file changed at
-    /// all".
-    pub blob: Oid,
-    /// The anchored lines, or `None` for a whole-file anchor.
-    pub lines: Option<LineRange>,
-    /// The anchored blob's full bytes, embedded verbatim
-    /// (`anchor.retention`) and serialized as a storage leaf blob.
-    pub content: Vec<u8>,
-    /// A window of up to `CONTEXT_MARGIN` (three) lines on either side of `lines`
-    /// (or the whole file, for a whole-file anchor), captured fresh at
-    /// [`capture`] time for [`crate::project_from_context`] to fuzzy-match
-    /// against once `commit` is gone.
-    pub context: Vec<u8>,
+    /// The non-derivable coordinates. [`Anchor::id`] hashes this alone.
+    pub identity: AnchorIdentity,
+    /// Retained, derivable, never identity-bearing.
+    pub hints: AnchorHints,
+}
+
+impl Anchor {
+    /// The anchor id (`anchor.identity`): the content hash of
+    /// [`Anchor::identity`] alone, independent of [`Anchor::hints`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # let dir = tempfile::tempdir().expect("tempdir");
+    /// # std::process::Command::new("git").arg("init").arg("-q").arg(dir.path()).status().unwrap();
+    /// # std::fs::write(dir.path().join("file.txt"), "a\nb\nc\n").unwrap();
+    /// # std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "-A"]).status().unwrap();
+    /// # std::process::Command::new("git").arg("-C").arg(dir.path())
+    /// #     .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "one"])
+    /// #     .status().unwrap();
+    /// let repo = gix::open(dir.path()).expect("open");
+    /// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).expect("capture");
+    /// assert!(anchor.id().is_ok());
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialize`] when the underlying `facet-git-tree` write fails.
+    pub fn id(&self) -> Result<ObjectId> {
+        let store = ObjectStore::default();
+        Ok(facet_git_tree::serialize_into(&self.identity, &store)?)
+    }
 }
 
 /// Build the [`Anchor`] for `path` (and optionally `lines`) as it exists at
@@ -143,7 +170,7 @@ pub struct Anchor {
 /// #     .status().unwrap();
 /// let repo = gix::open(dir.path()).expect("open");
 /// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).expect("capture");
-/// assert_eq!(anchor.path, "file.txt");
+/// assert_eq!(anchor.identity.path, "file.txt");
 /// assert_eq!(gix_anchor::snippet(&anchor).unwrap(), "line 1\nline 2\nline 3\n");
 /// ```
 pub fn capture(
@@ -173,28 +200,26 @@ pub fn capture(
     let context = capture_context(&content, lines);
 
     Ok(Anchor {
-        commit: commit_id.into(),
-        path: path.to_owned(),
-        blob: blob.into(),
-        lines,
-        content,
-        context,
+        identity: AnchorIdentity {
+            genesis: commit_id.into(),
+            path: path.to_owned(),
+            lines,
+        },
+        hints: AnchorHints {
+            blob: blob.into(),
+            content,
+            context,
+        },
     })
 }
 
 /// Build the [`Anchor`] for `path` (and optionally `lines`) as it currently
-/// sits in `repo`'s working tree (`anchor.working-tree`): the file's
-/// on-disk bytes are written to the object database as a blob and embedded
-/// exactly as [`capture`] embeds a committed blob (`anchor.retention`), so
-/// an anchor to uncommitted content survives that content being committed,
-/// amended, or discarded.
-///
-/// The anchor's commit field records `HEAD`'s commit — the same
-/// best-effort, never-load-bearing data field it is for a [`capture`]d
-/// anchor (`anchor.immutable`): the anchored blob at `HEAD` is usually a
-/// *different* blob than the one recorded here, and nothing ever diffs
-/// against `HEAD`'s tree to read this anchor back — its content is
-/// embedded.
+/// sits in `repo`'s working tree (`anchor.working-tree`): the on-disk bytes
+/// are written to the object database as a blob and embedded exactly as
+/// [`capture`] embeds a committed blob (`anchor.retention`), so an anchor to
+/// uncommitted content survives that content being committed, amended, or
+/// discarded. `identity.genesis` records `HEAD`'s commit, the same
+/// best-effort, never-load-bearing coordinate a [`capture`]d anchor's is.
 ///
 /// Fails with [`Error::NoWorkingTree`] on a bare repository, with
 /// [`Error::MissingPath`] when `path` is not a readable file on disk, and
@@ -218,7 +243,7 @@ pub fn capture(
 /// let repo = gix::open(dir.path()).expect("open");
 /// let anchor = gix_anchor::capture_worktree(&repo, "file.txt", None).expect("capture");
 /// assert_eq!(gix_anchor::snippet(&anchor).unwrap(), "edited, not yet committed\n");
-/// assert_eq!(gix::ObjectId::from(anchor.commit), repo.head_id().expect("head").detach());
+/// assert_eq!(gix::ObjectId::from(anchor.identity.genesis), repo.head_id().expect("head").detach());
 /// ```
 pub fn capture_worktree(
     repo: &gix::Repository,
@@ -253,18 +278,22 @@ pub fn capture_worktree(
     let context = capture_context(&content, lines);
 
     Ok(Anchor {
-        commit: commit_id.into(),
-        path: path.to_owned(),
-        blob: blob.into(),
-        lines,
-        content,
-        context,
+        identity: AnchorIdentity {
+            genesis: commit_id.into(),
+            path: path.to_owned(),
+            lines,
+        },
+        hints: AnchorHints {
+            blob: blob.into(),
+            content,
+            context,
+        },
     })
 }
 
 /// The exact text of `anchor`'s lines — the whole file for a whole-file
-/// anchor — derived at read time from [`Anchor::content`], so it can never
-/// disagree with what was captured and is never itself stored
+/// anchor — derived at read time from [`AnchorHints::content`], so it can
+/// never disagree with what was captured and is never itself stored
 /// (`anchor.immutable`).
 ///
 /// # Examples
@@ -283,9 +312,9 @@ pub fn capture_worktree(
 /// assert_eq!(gix_anchor::snippet(&anchor).unwrap(), "b\n");
 /// ```
 pub fn snippet(anchor: &Anchor) -> Result<String> {
-    match anchor.lines {
-        None => Ok(String::from_utf8_lossy(&anchor.content).into_owned()),
-        Some(range) => lines_of(&anchor.content, &anchor.path, range),
+    match anchor.identity.lines {
+        None => Ok(String::from_utf8_lossy(&anchor.hints.content).into_owned()),
+        Some(range) => lines_of(&anchor.hints.content, &anchor.identity.path, range),
     }
 }
 
@@ -339,10 +368,13 @@ mod tests {
         let git_repo = gix::open(dir.path()).unwrap();
 
         let anchor = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
-        assert_eq!(ObjectId::from(anchor.commit).to_string(), head(dir.path()));
-        assert_eq!(anchor.path, "file.txt");
-        assert_eq!(anchor.lines, range(3, 4));
-        assert_eq!(anchor.content, numbered(1..=10).into_bytes());
+        assert_eq!(
+            ObjectId::from(anchor.identity.genesis).to_string(),
+            head(dir.path())
+        );
+        assert_eq!(anchor.identity.path, "file.txt");
+        assert_eq!(anchor.identity.lines, range(3, 4));
+        assert_eq!(anchor.hints.content, numbered(1..=10).into_bytes());
         assert_eq!(snippet(&anchor).unwrap(), "line 3\nline 4\n");
     }
 
@@ -375,7 +407,7 @@ mod tests {
 
         // 3 lines of margin on each side of a 2-line range: lines 2..=9.
         let expected: String = (2..=9).map(|n| format!("line {n}\n")).collect();
-        assert_eq!(anchor.context, expected.into_bytes());
+        assert_eq!(anchor.hints.context, expected.into_bytes());
     }
 
     #[test]
@@ -386,7 +418,7 @@ mod tests {
         let git_repo = gix::open(dir.path()).unwrap();
         let anchor = capture(&git_repo, "HEAD", "file.txt", range(1, 2)).unwrap();
 
-        assert_eq!(anchor.context, numbered(1..=4).into_bytes());
+        assert_eq!(anchor.hints.context, numbered(1..=4).into_bytes());
     }
 
     #[test]
@@ -397,12 +429,12 @@ mod tests {
         let git_repo = gix::open(dir.path()).unwrap();
         let anchor = capture(&git_repo, "HEAD", "file.txt", None).unwrap();
 
-        assert_eq!(anchor.context, numbered(1..=5).into_bytes());
+        assert_eq!(anchor.hints.context, numbered(1..=5).into_bytes());
     }
 
     /// `anchor.working-tree`: capture reads the *on-disk* bytes (not
     /// `HEAD`'s blob), writes them to the odb as a blob, and records
-    /// `HEAD`'s commit as the plain-data commit field.
+    /// `HEAD`'s commit as the plain-data `identity.genesis` coordinate.
     #[test]
     fn capture_worktree_records_dirty_bytes_head_and_an_odb_blob() {
         let dir = repo();
@@ -413,14 +445,17 @@ mod tests {
         let git_repo = gix::open(dir.path()).unwrap();
 
         let anchor = capture_worktree(&git_repo, "file.txt", range(5, 6)).unwrap();
-        assert_eq!(ObjectId::from(anchor.commit).to_string(), head(dir.path()));
-        assert_eq!(anchor.content, dirty.clone().into_bytes());
+        assert_eq!(
+            ObjectId::from(anchor.identity.genesis).to_string(),
+            head(dir.path())
+        );
+        assert_eq!(anchor.hints.content, dirty.clone().into_bytes());
         assert_eq!(snippet(&anchor).unwrap(), "line five\nline 6\n");
         // The blob exists in the odb from the moment of capture, under the
         // on-disk bytes' own id — not HEAD's version of the file.
-        assert!(git_repo.has_object(ObjectId::from(anchor.blob)));
+        assert!(git_repo.has_object(ObjectId::from(anchor.hints.blob)));
         let committed = capture(&git_repo, "HEAD", "file.txt", None).unwrap();
-        assert_ne!(anchor.blob, committed.blob);
+        assert_ne!(anchor.hints.blob, committed.hints.blob);
     }
 
     /// The anchor survives the uncommitted content being committed
@@ -468,10 +503,55 @@ mod tests {
             panic!("Anchor must reflect as a struct");
         };
         let names: Vec<_> = struct_ty.fields.iter().map(|f| f.name).collect();
+        assert_eq!(names, vec!["identity", "hints"]);
+
+        let Type::User(UserType::Struct(identity_ty)) = AnchorIdentity::SHAPE.ty else {
+            panic!("AnchorIdentity must reflect as a struct");
+        };
+        let identity_names: Vec<_> = identity_ty.fields.iter().map(|f| f.name).collect();
+        assert_eq!(identity_names, vec!["genesis", "path", "lines"]);
+
+        let Type::User(UserType::Struct(hints_ty)) = AnchorHints::SHAPE.ty else {
+            panic!("AnchorHints must reflect as a struct");
+        };
+        let hints_names: Vec<_> = hints_ty.fields.iter().map(|f| f.name).collect();
         assert_eq!(
-            names,
-            vec!["commit", "path", "blob", "lines", "content", "context"],
-            "Anchor must derive its snippet from `content`, never cache it in a separate field"
+            hints_names,
+            vec!["blob", "content", "context"],
+            "snippet must derive from `hints.content`, never cache it in a separate field"
         );
+    }
+
+    /// `anchor.identity`: the id is a pure function of `identity` alone.
+    #[test]
+    fn id_is_invariant_under_a_hints_change_and_varies_with_any_identity_coordinate() {
+        let dir = repo();
+        std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
+        commit_all(dir.path(), "one");
+        let git_repo = gix::open(dir.path()).unwrap();
+        let anchor = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
+
+        let mut same_identity = anchor.clone();
+        same_identity.hints.context = b"unrelated\n".to_vec();
+        assert_eq!(
+            anchor.id().unwrap(),
+            same_identity.id().unwrap(),
+            "changing a hint must not change the id"
+        );
+
+        let mut different_path = anchor.clone();
+        different_path.identity.path = "other.txt".to_owned();
+        assert_ne!(anchor.id().unwrap(), different_path.id().unwrap());
+
+        let mut different_lines = anchor.clone();
+        different_lines.identity.lines = range(5, 6);
+        assert_ne!(anchor.id().unwrap(), different_lines.id().unwrap());
+
+        let mut different_genesis = anchor.clone();
+        different_genesis.identity.genesis =
+            gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567")
+                .unwrap()
+                .into();
+        assert_ne!(anchor.id().unwrap(), different_genesis.id().unwrap());
     }
 }

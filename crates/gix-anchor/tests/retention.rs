@@ -60,7 +60,13 @@ fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
 
     let store = ObjectStore::default();
     let root = serialize_into(&anchor, &store).expect("serialize");
-    let entries = store.get_tree(&root).expect("anchor tree");
+    let top = store.get_tree(&root).expect("anchor tree");
+    let hints_oid = top
+        .iter()
+        .find(|e| e.filename == "hints")
+        .expect("hints entry")
+        .oid;
+    let entries = store.get_tree(&hints_oid).expect("hints tree");
 
     for entry in &entries {
         assert_ne!(
@@ -77,7 +83,7 @@ fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
     assert_eq!(content.mode.kind(), EntryKind::Blob);
     assert_ne!(
         content.oid,
-        gix::ObjectId::from(anchor.blob),
+        gix::ObjectId::from(anchor.hints.blob),
         "serialized leaf encoding stores retained bytes under a storage-leaf oid"
     );
     let context = entries
@@ -99,9 +105,16 @@ fn anchored_content_is_reachable_from_the_storing_documents_tree() {
 
     let store = ObjectStore::default();
     let anchor_tree = serialize_into(&anchor, &store).expect("serialize anchor");
-    let retained_content = store
+    let hints_tree = store
         .get_tree(&anchor_tree)
         .expect("anchor tree")
+        .into_iter()
+        .find(|entry| entry.filename == "hints")
+        .expect("hints entry")
+        .oid;
+    let retained_content = store
+        .get_tree(&hints_tree)
+        .expect("hints tree")
         .into_iter()
         .find(|entry| entry.filename == "content")
         .expect("content entry")
