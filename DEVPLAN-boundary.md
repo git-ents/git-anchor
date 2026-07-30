@@ -101,13 +101,17 @@ Two things settle it, in order:
    Exactly one such field is required for the positional form to apply at all; zero or more than one refuses it with an error naming the candidates, and `--json <value>` — a whole `facet_value::Value` literal — is the general escape hatch regardless.
    Applied to `gix-comment`'s document, excluding `binding` and the two `Optional` fields (`parent`, `state`) leaves `body` and `created_at`; only `body` is `Node::String`, so the rule resolves to `body` without the CLI knowing anything about `created_at` specifically.
 
-`created_at: u64` still needs *some* value: `crates/facet-git-tree/src/schema/read.rs`'s `read_struct` requires a tree entry for every field a `Node::Struct` names, `Optional` or not, so a document written with `created_at` simply absent fails on the very next read with `SchemaReadError::MissingField` — whatever `write_named_tree`'s own, looser-sounding doc comment claims about skipping absent fields on write.
+`created_at: u64` still needs *some* value: `crates/facet-git-tree/src/schema/read.rs`'s `read_struct` requires a tree entry for every field a `Node::Struct` names, `Optional` or not, so a document written with `created_at` simply absent fails on the very next read with `SchemaReadError::MissingField` — whatever `write_named_tree`'s own, looser-sounding doc comment claims about skipping absent fields on write, itself a second upstream inconsistency named below.
 The schema gives the CLI no way to know `created_at` specifically wants `now_nanos()`: `facet` does support per-field defaults (`facet_core::Field::default`/`has_default()`, driven by `#[facet(default)]`/`#[facet(default = expr)]`), but that metadata lives on a compiled type's `Shape`, which only `Typed<T>` ever sees — `schema_of` does not carry it into the wire `Schema`/`Node`, whose `Node::Struct` has no per-field default or provenance marker at all.
-This is a real upstream gap (`crates/facet-git-tree/src/schema/mod.rs`), not a missed call: closing it means extending `Node::Struct`'s field representation, which the type's own doc comment calls a semver-major `schema.representation` change, and is out of scope for a docs-only decision.
+This is a real upstream gap (`crates/facet-git-tree/src/schema/mod.rs`), not a missed call: closing it means extending `Node::Struct`'s field representation, which the type's own doc comment calls a semver-major `schema.representation` change — named as upstream work this phase depends on, below, not worked around here.
 
-The practical answer that needs no upstream change: the CLI fills every remaining required field with its `Node`'s natural zero value (`0`, `""`, empty `Bytes`/`List`/`Map`, `false`) — computable from the `Node` alone, no default metadata required.
-For `created_at` that means a generically-written comment gets `created_at: 0`, a wrong-but-schema-conforming value rather than a crash — which is Consequence 2's tension, not a separate problem: the generic writer can always produce a *conforming* document, never a *meaningful* one.
-Zero-filling has no good answer for a required field whose `Node` is a multi-variant `Enum` with no unit variant, or a nested struct that recurses into the same problem; `gix-comment`'s document never hits this (every field besides `binding` is a scalar, a string, or `Optional`), so it does not block this decision, but a future kind that does needs `--json`.
+`created_at` is an ordering key, not a degenerate value the CLI can shrug off: `crates/gix-anchor/src/store.rs` documents it as a nanosecond timestamp, a finer-grained tiebreak than a commit's one-second author time, and `crates/gix-comment/src/comment.rs` sorts replies on it.
+A comment written with `created_at: 0` would sort before every other comment in its thread, permanently, with nothing to signal that anything went wrong — silent data corruption, not a wrong-but-tolerable value.
+The generic writer therefore never invents a value for a required field it cannot populate: after the binding field and the positional argument are filled (the two rules above, unchanged), `git anchor add <kind> …` refuses if any remaining field is required — not `Node::Optional` — and still unfilled, with an error naming those fields and pointing the caller at `--json <value>` to supply the whole document explicitly.
+
+Applied to `gix-comment`'s document, this refusal is not hypothetical: `created_at` is required and the schema gives the CLI no way to fill it, so `git anchor add comment "some text"` does not work today — it refuses, naming `created_at`.
+The equivalence Phase 3 opens with — `git anchor add comment "some text"` is `git comment add "some text"` by another name — is therefore a goal this phase moves toward, not something Phase 3 delivers the moment it ships: it holds only once the upstream item below is closed.
+A plan that claimed the command works today, when it would refuse, would be worse than one that names the dependency.
 
 ### Consequence 2 — schema conformance is not domain validity
 
@@ -124,6 +128,24 @@ Position taken: close what can be closed by putting the vocabulary in the type, 
 - **Non-blank `body` and a `parent` that resolves are not closeable this way.**
   Neither is a shape constraint `Node` can express: `Node::String` has no "non-empty" variant, and `parent` naming another entity is cross-entity referential integrity, entirely outside one document's schema.
   `gix-comment` has to treat every document conforming to its own schema as untrusted external content for these two properties — the same posture `State::from_store` already takes toward an unrecognized string today — so `Comments::get`/`thread`/`hydrate` must handle a blank body or a dangling `parent` as legal-but-degenerate input (an empty rendered comment, a reply that resolves to no parent), never `panic!`/`expect` on the read path.
+
+### Upstream work this phase depends on
+
+Two gaps in `../git-store` are load-bearing for this phase, not incidental: the standing rule this project follows (`DEVPLAN-storage.md`'s Phase 0 "Shipped" note) is that a gap in a `../git-store` crate gets fixed upstream, not worked around downstream.
+
+- **Field default/provenance metadata in `Schema`.**
+  `crates/facet-git-tree/src/schema/mod.rs`'s `Node::Struct(BTreeMap<String, Node>)` carries no per-field marker distinguishing a field the writer must supply from one it may leave for something else to fill; closing Consequence 1's gap needs that added to `Node::Struct`'s field representation, which the type's own doc comment already calls a semver-major `schema.representation` change.
+  Pick a field-level default-presence marker over carrying the default value itself: `created_at`'s wanted default (`now_nanos()`) is computed at write time, not a fixed constant, so baking a snapshot into the schema reproduces the exact silent-corruption failure Consequence 1 rejects zero-filling for, just relocated upstream.
+  A marker also keeps `Schema`/`Node` a pure shape descriptor — no other `Node` variant carries a value, and a default-value variant would be the sole exception.
+  Unscheduled: a named dependency of Phase 3's `add` working for `gix-comment`'s document, not a blocker on this commit.
+- **`read_struct`/`write_named_tree` disagree on an absent `Optional` field.**
+  Confirmed by reading both: `read_struct` (`crates/facet-git-tree/src/schema/read.rs`) requires a tree entry for every field a `Node::Struct` names, `Optional` included — a field's `None` is the entry pointing at the presence-marker tree, never the entry's absence — while `write_named_tree` (`crates/facet-git-tree/src/schema/write.rs`) silently skips any field absent from the input object.
+  `write_named_tree`'s doc comment is the stale side: it claims to match "the read path's leniency," but `read_struct`'s own doc comment says strictness was added specifically to make it usable as a conformance check, which the two functions no longer agree on.
+  A `Value` built by a caller who omits an `Optional` field, rather than setting it `null`, writes today without error and then fails to read back with `SchemaReadError::MissingField` — a document that round-trips one way only.
+  Named as a second upstream item; not fixed here.
+
+Whether `created_at` should exist in the document at all: keep it, and close the metadata gap above, rather than drop it and fall back to a commit's one-second author-time resolution with the oid as tiebreak.
+`gix-comment`'s own reply sort (`crates/gix-comment/src/comment.rs`) already leans on nanosecond resolution specifically because two replies landing in the same second are not a corner case worth losing precision over.
 
 ### What this changes elsewhere in the plan
 
