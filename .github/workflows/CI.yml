@@ -126,16 +126,18 @@ jobs:
       # other exists." Sharing this workspace changes nothing, so the
       # resolved dependency graph has to say so, in both directions and
       # transitively.
+      # The CLI over attest is held to the same isolation as the library it
+      # drives: `git attest` never reaches anchor's vocabulary either.
       - name: No gix-anchor / gix-attest dependency edge
         run: |
           set -uo pipefail
           failed=0
-          for pair in "gix-attest:gix-anchor" "gix-anchor:gix-attest"; do
+          for pair in "gix-attest:gix-anchor" "gix-anchor:gix-attest" "git-attest:gix-anchor"; do
             from="${pair%%:*}"
             to="${pair##*:}"
             if cargo tree --all-features --edges normal,build,dev --prefix none \
                  --package "$from" | awk '{print $1}' | grep -qFx "$to"; then
-              echo "::error::$from depends on $to: gix-anchor and gix-attest must never know each other exists"
+              echo "::error::$from depends on $to: anchor and attest must never know each other exists"
               failed=1
             else
               echo "ok: $from does not reach $to"
