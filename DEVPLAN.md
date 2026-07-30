@@ -1,103 +1,62 @@
 # git-anchor — dev plan
 
-Extract the anchor subsystem from `../git-ents` into this standalone repo, modeled file-for-file on `../git-store`.
-Two published-shape crates: **`gix-anchor`** (library) and **`git-anchor`** (CLI, invoked as `git anchor`).
+[`ARCHITECTURE.md`](ARCHITECTURE.md) states the settled design.
+This plan is what remains to make the code match it.
+`DEVPLAN-boundary.md` and `DEVPLAN-storage.md` covered the storage-engine and boundary migrations that preceded this one; both shipped and are deleted here — git history retains them.
 
-## Source material
+## Phase 1 — Split `Binding` into `identity` and `hints`
 
-- Library source: `../git-ents/crates/kernel/ents-anchor` (~3.5k lines: `anchor.rs`, `binding.rs`, `diff.rs`, `projection.rs`, `error.rs`, `fixture.rs`, `util.rs`; tests `binding_roundtrip.rs`, `retention.rs`).
-  Deps: `facet`, `facet-git-tree`, `gix`, `gix-object`, `thiserror`.
-- Spec it implements: `../git-ents/docs/spec/anchor.sdoc` (port the relevant spec
-  into this repo's `docs/`; keep the spec-coverage doc comments in `lib.rs` accurate
-  after the move).
-- Template: `../git-store` — copy conventions, configs, and workflows verbatim,
-  adapting names.
+`Binding`'s position case currently carries `commit`, `blob`, `path`, `lines`, `content`, `context` as one flat set of fields, all hashed together into whatever identity a consumer derives from it.
+Restructure it into two sibling subtrees:
 
-## Phase 1 — Scaffold from git-store
+- `identity` — `genesis_rev`, `path`, `lines` only.
+  The anchor id is the content hash of this subtree and nothing else.
+- `hints` — `content` (the anchored blob, referenced by its own oid), `context` (the fresh window `project_from_context` falls back to), and room for a future fingerprint/descriptor without a schema migration (`facet-git-tree` writes every field present as a sentinel, so an empty variant costs nothing).
 
-Copy from `../git-store`, renaming `store` → `anchor` everywhere:
+`blob`'s object id becomes derivable — read the genesis tree at `path` — rather than a stored identity field; drop it from `identity`, keep deriving it where a hint needs it.
+Every consumer of `Anchor`'s current flat shape (`capture`, `project`, `diff_trees`, `snippet`) moves to the split shape; none of their *behavior* changes, only which fields live where.
 
-- `.config/` — `committed.toml`, `deny.toml`, `pre-commit.yaml`, `rumdl.toml`,
-  `typos.toml`, `release-please-config.json` + `release-please-manifest.json`
-  (crate paths updated, versions reset).
-- `.github/workflows/` — `CI.yml`, `CD.yml`, `Lint.yml`, `Version.yml` (update
-  binary/crate names in CD).
-- `.gitignore`, `.rules`, `.zed/settings.json`, `CONDUCT.md`, `CONTRIBUTING.md`,
-  `COPYRIGHT`, `LICENSE-APACHE`, `LICENSE-MIT`.
-- Root `Cargo.toml`: workspace, `resolver = "3"`, members
-  `crates/gix-anchor`, `crates/git-anchor`, `crates/test-support`.
-- `crates/test-support`: copy from git-store as-is (trim to what tests use).
+Update `docs/specification.adoc`'s `anchor.definition`/`anchor.identity`/`anchor.immutable`/`anchor.retention` requirement ids' doc-comment references in `crates/gix-anchor/src/*.rs` to point at the split fields.
 
-Match git-store's manifest style: edition 2024, same `gix` version/features (`0.85.0`, `default-features = false`, `sha1`, `zlib-rs`; CLI adds `interrupt`, `revision`), same `facet` (`0.50.0-rc.0`, `reflect`) and `facet-git-tree` versions.
-**Decision:** `facet-git-tree` lives in git-store as a path crate — use the published crates.io version if available; otherwise a git dependency on git-store.
-Do not vendor it.
+Acceptance: `anchor_id(coords)` is a pure function of `(genesis_rev, path, lines)`; a property test asserts it is invariant under changing `hints` while `identity` is held fixed, and changes when any identity coordinate changes.
 
-## Phase 2 — `crates/gix-anchor` (library)
+## Phase 2 — Comments leave this repo
 
-Port `ents-anchor` → `gix-anchor`:
+Another agent deletes `crates/gix-comment`, `crates/git-comment`, `crates/gix-comment-lsp`, and `editors/zed` in parallel with this plan; comments become a `git-forge` document.
+Once that lands, confirm nothing here still references them:
 
-- Rename crate + all `ents_anchor` paths; strip git-ents-workspace inheritance
-  (`edition.workspace` etc.) to match git-store's per-crate manifests.
-- Remove/replace references to `ents-forge`/git-ents internals in docs and
-  doctests (the `Comment`-shaped stand-in struct pattern already used there is
-  fine to keep).
-- Keep the existing model intact: `Anchor` (blob + optional `LineRange` +
-  commit), `capture`/`capture_worktree`, `snippet`, `project`/`project_exact`/
-  `project_from_context`/`project_worktree`, the four-outcome `Projection`,
-  `diff_trees`, and the binding (serialization via `facet-git-tree`).
-- **Generalize per this repo's charter** ("attach arbitrary content to Git objects, optionally line ranges within a blob"): the anchor *target* becomes any object id (commit, tree, tag, or blob; line ranges valid only for blobs), and the attached *payload* is any `Facet` type serialized with `facet-git-tree`.
-  Design this as an additive layer over the ported code — do not rewrite projection to do it.
-- Port both integration tests + proptests; all doctests runnable.
+- Root `Cargo.toml` workspace members list only `gix-anchor`, `git-anchor`, `test-support`.
+- No doc, doctest, or fixture names `gix_comment`/`git_comment`/`gix-comment-lsp`.
+- `cargo test --workspace` is green with the smaller member set.
 
-## Phase 3 — Persistence
+## Phase 3 — `git anchor` narrows to capture + inject
 
-Anchors must survive in the repo.
-Follow `gix-store`'s pattern (`store.rs`/`refname.rs`): serialized anchor trees reachable under a ref namespace, e.g. `refs/anchors/<target-oid>/<anchor-id>`.
-**Decision:** depend on `gix-store` (git dep on git-store) vs. reimplement the small ref-store layer here.
-Recommend depending on it — the user said to *use* git-store, and it keeps retention (`anchor.retention`: content stored as real blobs, never gitlinks) in one place.
+Split the current `add` verb into two:
 
-**What actually shipped, and the correction:** this recommendation was not followed — `store.rs`/`refname.rs` reimplement per-ref locking, CAS retry, and refname validation locally, taking only `facet-git-tree` from git-store.
-`../git-store` has since factored exactly that layer out as `gix-refstore`, and `DEVPLAN-attest.md` Phase 0 migrated this crate onto it (done 2026-07-29), so the family has one ref-CAS engine rather than two.
-[`DEVPLAN-storage.md`](DEVPLAN-storage.md) then migrated the whole entity engine — schema publication, commit-forward, history, CAS retry — onto `gix-store`, leaving `store.rs` a thin adapter (done 2026-07-29).
-[`DEVPLAN-boundary.md`](DEVPLAN-boundary.md) removes even that: persistence becomes the consumer's, and `gix-anchor` keeps no storage dependency at all.
-Treat those plans, not this line, as the record of what shipped.
+- `create` — capture only.
+  Writes the identity and hints objects to the object database and prints the anchor id.
+  Advances no ref; needs no registered kind.
+- `inject <kind> [<text>] --anchor <id>` — write an entity of `<kind>` embedding a previously created id, over `gix-store`'s dynamic write path.
+  Requires `<kind>`'s published schema to embed `Binding`'s shape, located structurally.
 
-## Phase 4 — `crates/git-anchor` (CLI)
+`list`/`show`/`remove` are unaffected in shape; `show <name>@<rev>` still re-derives projection from the entity's own `Binding`.
+See [`git-anchor`'s README](crates/git-anchor) for the full command reference this phase implements.
 
-Mirror git-store's CLI crate (`clap` derive, `anyhow`, thin `main.rs`).
-Subcommands (installable as `git anchor` via binary name on PATH):
+Acceptance: two `create` calls with identical coordinates print the identical id; `inject` with a stale or foreign id still writes (dedup is a property of the id, not a constraint `inject` enforces); `cargo test --workspace` covers both verbs.
 
-- `git anchor add <object> [-L <start>,<end>] [--path <blob-path>] (-m <msg> | -F <file> | --json <file>)` — capture + store.
-- `git anchor list [<object>]`
-- `git anchor show <anchor-id> [--json]`
-- `git anchor project <anchor-id> <commit>` — print projection outcome + snippet.
-- `git anchor remove <anchor-id>`
+## Phase 4 — Dynamic write path moves to `gix-store`
 
-Exit codes and output style copied from git-store's CLI.
-Integration tests with `test-support` + `tempfile` fixtures per subcommand.
+The schema-reflection and dynamic-value-write logic `git anchor inject` needs — locate a schema field structurally equal to `Binding`'s, build a `facet_value::Value` against a runtime `Schema`, write it through `Kind::dynamic` — is generic over any vocabulary type, not anchor-specific.
+It belongs in `../git-store` as reusable library surface, not duplicated here as CLI-only code.
 
-## Phase 5 — Docs & polish
+Per this project's standing rule (fix substrate gaps upstream in `../git-store` and push, don't work around them here): if `gix-store` is missing a piece this phase needs — a helper for "does this schema embed shape X" as a public function rather than an inlined comparison, for instance — fix it upstream first, then depend on the fixed version.
+Do not reimplement it in `crates/git-anchor` a second time.
 
-- Root `README.md` + per-crate READMEs in git-store's style (feature table if
-  any features exist).
-- `docs/specification.adoc` — port/adapt `anchor.sdoc` content to this repo's
-  doc format (git-store uses asciidoc).
-- `cargo fmt`, `cargo clippy` clean, `cargo deny check`, typos/rumdl/committed
-  clean per `.config`; CI workflows green.
+Acceptance: `crates/git-anchor/src/main.rs` calls into `gix-store` for schema lookup and dynamic writes with no bespoke reflection code of its own; the equivalent logic, if it existed here before this phase, is deleted rather than left as a second copy.
 
 ## Definition of done
 
-- `cargo test --workspace` passes; doctests included.
-- `git anchor add/list/show/project/remove` round-trip against a scratch repo.
-- Repo file tree is a believable sibling of git-store (same top-level files).
-- No references to `ents-*` remain except attribution in docs where useful.
-
-## Open decisions (recommendations inline above)
-
-1. `facet-git-tree` dependency source (published vs. git dep on git-store).
-   Resolved: git dep on git-store.
-2. Depend on `gix-store` for ref persistence vs. local minimal ref layer.
-   Resolved late: shipped as a local layer, then migrated onto `gix-refstore`, then onto `gix-store` in full — see Phase 3's correction above.
-3. Ref namespace layout for stored anchors (`refs/anchors/...`).
-   Resolved: `refs/anchors/data/notes/<target-hex>/<id-hex>` with the kind's schema at `refs/anchors/schema/notes`, both derived from one prefix that `Store::with_prefix` supplies.
-   The `<data>/<kind>/<entity>` shape is structural to `gix_store::Layout`, not a choice.
+- `cargo test --workspace` passes, doctests included, over the two-crate workspace.
+- `ARCHITECTURE.md`, `docs/specification.adoc`, and both crate READMEs describe exactly what the code does — no more, no less.
+- No reference to `gix-comment`/`git-comment`/`gix-comment-lsp` remains anywhere in this repo.
+- `git anchor create`/`inject`/`list`/`show`/`remove` round-trip against a scratch repo and a registered test kind.

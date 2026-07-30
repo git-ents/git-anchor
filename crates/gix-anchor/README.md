@@ -2,12 +2,14 @@
 
 Attach arbitrary content to Git objects — and, for a blob, to a line range within it — such that the attachment *follows the content* as history moves.
 
-An **anchor** is a durable pointer into source: a blob, an optional 1-based inclusive line range, and the commit it was captured against.
-Anchors resolve and *project* independently of any consumer — a comment is merely the first client; reviews, TODO trackers, and blame overlays reuse the same mechanism.
+An **anchor** is a durable pointer into source: a genesis commit, a repository-relative path, and an optional 1-based inclusive line range — nothing else.
+That triple is an anchor's *identity*; the anchor id is the content hash of it.
+Everything else this crate retains — the anchored blob's own copy, a context window, any structural descriptor — is a *hint*: additive, versioned, upgradeable, and never part of the id.
+Anchors resolve and *project* independently of any consumer — reviews, TODO trackers, and blame overlays all reuse the same mechanism.
 The library is `gix`-native and oid-in/oid-out: it performs its own object reads over a [`gix::Repository`], with no materialized worktree required for diffs.
 It persists nothing itself — no ref, no commit; persistence belongs to the consumer, over `gix-store`.
 
-See [`docs/specification.adoc`](../../docs/specification.adoc) for the normative requirements this crate implements (`anchor.definition`, `anchor.immutable`, `anchor.retention`, `anchor.projection`, `anchor.fuzzy-fallback`, `anchor.working-tree`, `anchor.tree-pair-diff`).
+See [`docs/specification.adoc`](../../docs/specification.adoc) for the normative requirements this crate implements (`anchor.definition`, `anchor.identity`, `anchor.immutable`, `anchor.retention`, `anchor.projection`, `anchor.fuzzy-fallback`, `anchor.working-tree`, `anchor.tree-pair-diff`).
 
 ## Capture and project
 
@@ -42,8 +44,17 @@ A [`Binding`] names the object an anchor is attached to:
 - `Delta`, `Hybrid` — a change between two trees, or a commit paired with a tree.
 
 `Binding::target()` returns the primary object id, which a consumer typically uses as its own ref-path grouping key.
-`Binding` is a **vocabulary type**: embed it as an inline field of your own `Facet` document, and a generic consumer (`git anchor`, an LSP, a query engine) can discover that the kind is anchorable by structural comparison against `Binding`'s own schema, with no per-kind convention.
-See [`gix-comment`](../gix-comment) for the first consumer, and [`ARCHITECTURE.md`](../../ARCHITECTURE.md) for why the field is embedded inline rather than referenced by tree id.
+`Binding` is a **vocabulary type**: embed it as an inline field of your own `Facet` document —
+
+```rust
+#[derive(Facet)]
+struct Review { body: String, binding: Binding }
+```
+
+— and a generic consumer (`git anchor`, an LSP, a query engine) can discover that the kind is anchorable by structural comparison against `Binding`'s own schema, with no per-kind convention.
+Internally `Binding` splits into two sibling subtrees: `identity`, the non-derivable coordinates the anchor id hashes, and `hints`, everything retained for approximate re-anchoring.
+Two captures of the same coordinates produce the same id and share whatever refers to it; nothing about *who* captured it is part of the anchor.
+See [`ARCHITECTURE.md`](../../ARCHITECTURE.md) for the identity/hints split, why the field is embedded inline rather than referenced by tree id, and why `project` here never sees a pin.
 
 ## Tree-pair diff
 

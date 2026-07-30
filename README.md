@@ -1,42 +1,25 @@
 # git-anchor
 
 Attach arbitrary content to Git objects — a commit, tree, tag, or blob — and optionally to a line range within a blob.
-The attachment survives history: an anchor captured against one commit projects onto any later commit, so a comment, review note, or TODO pinned to a span of code follows that code as it moves.
+The attachment survives history: an anchor captured against one commit projects onto any later commit, so a review note or TODO pinned to a span of code follows that code as it moves.
 
-Four crates — the anchor primitive and its CLI, plus a first consumer (comments) and its CLI:
+Two crates:
 
-- [`gix-anchor`](crates/gix-anchor) — the library: capture and project
-  anchors over a `gix` repository, and the `Binding` vocabulary type; persists
-  nothing itself.
-- [`git-anchor`](crates/git-anchor) — a git external subcommand
-  (`git anchor …`), generic over any registered `gix-store` kind whose
-  schema embeds `Binding`.
-- [`gix-comment`](crates/gix-comment) — a message pinned to any anchor, built
-  on `gix-anchor`'s `Binding` and its own `gix-store`-backed document, whose
-  author and timestamp are the storage commit's, plus an optional raw-tree
-  attachment, reply threads, and a resolvable open/resolved state.
-- [`git-comment`](crates/git-comment) — a git external subcommand
-  (`git comment …`), the ergonomic front end for the `comment` kind.
+- [`gix-anchor`](crates/gix-anchor) — the library: capture and project anchors over a `gix` repository, and the `Binding` vocabulary type; persists nothing itself.
+- [`git-anchor`](crates/git-anchor) — a git external subcommand (`git anchor …`) that captures a binding and injects it into a document of any `gix-store` kind whose published schema embeds `Binding`'s shape.
 
 ## Demo
 
 ```console
-$ git comment add --path src/lib.rs -L 10,14 -m "revisit this bound"
-dd1ebeb2e71b2313eeab6b14bf89a7333ac1bd6b
+$ git anchor create --path src/lib.rs -L 10,14
+a3f1c9e2b4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9
 
-$ git comment list
-dd1ebeb2  Ada  open  revisit this bound
-
-$ git comment show dd1ebeb2@main       # where does that span sit on main?
-relocated
-path: src/lib.rs
-lines: 12,16
+$ git anchor create --path src/lib.rs -L 10,14   # captured again, same coordinates
+a3f1c9e2b4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9          # identical id: anchors dedup, and have no creator
 ```
 
-A comment is a real ref and commit — `refs/comments/data/comment/<target-hex>/<id-hex>` — so `git ls-tree`, `git cat-file`, and `git log` inspect it with no application required.
-`git anchor --prefix refs/comments add comment "revisit this bound" --path src/lib.rs -L 10,14` writes the identical entity generically, through `git-anchor`, which was never compiled against `gix-comment`'s Rust type — the concrete proof that a kind is anchorable by reflection over its published schema, not by convention.
-Projection reports one of four outcomes as the code moves: *current*, *relocated* (new path/lines), *outdated* (an edit touched the span), or *deleted*.
-Once the anchored commit is gc'd, it falls back to fuzzy-matching a retained context blob.
+`create` is a pure emitter: it writes the identity and hints objects and prints the anchor id, advancing no ref.
+Injecting that id into a document — `git anchor inject <kind> … --anchor <id>` — is the second half of the CLI; see [`git-anchor`'s README](crates/git-anchor) for the full command reference and a worked example against a registered kind.
 
 See [`docs/specification.adoc`](docs/specification.adoc) for the normative requirements, and each crate's `README` for its API and command reference.
 [`ARCHITECTURE.md`](ARCHITECTURE.md) states which capability belongs to which crate — here and in [`git-store`](https://github.com/git-ents/git-store), whose `facet-git-tree`, `gix-refstore`, and `gix-store` do the encoding, ref, and persistence work these crates build on.
