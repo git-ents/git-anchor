@@ -39,9 +39,8 @@ use gix_store::{Layout, RefPath, RefPrefix, RefSegment, RepoStore, entity_name_u
     version
 )]
 struct Cli {
-    /// The store's ref namespace. Defaults to `gix-anchor`'s own; pass
-    /// `refs/comments` to reach `gix-comment`'s kinds, or any other prefix a
-    /// `gix-store` consumer publishes under.
+    /// The store's ref namespace. Defaults to `gix-anchor`'s own; pass any
+    /// other prefix a `gix-store` consumer publishes under.
     #[arg(long, global = true, default_value = "refs/anchors")]
     prefix: RefPrefix,
     #[command(subcommand)]

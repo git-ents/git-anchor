@@ -1,10 +1,10 @@
 //! Drive the built `git-anchor` binary against a temp repo, exactly as
 //! `git anchor …` would.
 //!
-//! `git-anchor` defines no document type of its own (`DEVPLAN-boundary.md`
-//! Phase 3), so every test here first publishes a schema for some test
-//! fixture kind — the same thing `gix-comment` or any other `gix-store`
-//! consumer would already have done before a user ever runs `git anchor`.
+//! `git-anchor` defines no document type of its own, so every test here
+//! first publishes a schema for some test fixture kind — the same thing any
+//! `gix-store` consumer would already have done before a user ever runs
+//! `git anchor`.
 
 use std::io::Write;
 use std::path::Path;
@@ -548,75 +548,4 @@ fn prefix_selects_a_disjoint_store() {
     );
     assert!(ok, "show under a custom prefix failed: {err}");
     assert!(out.contains("elsewhere"), "show output: {out}");
-}
-
-// ── the git-anchor / git-comment equivalence ─────────────────────────────
-
-/// `DEVPLAN-boundary.md` Phase 3 opens with `git anchor add comment "some
-/// text"` being `git comment add "some text"` "by another name". With Phase
-/// 2's three shape fixes in place — `body: String` (so the positional
-/// argument has a `Node::String` field to land on at all), `state:
-/// Option<State>`, and `created_at`'s `#[facet(default)]` (so the one
-/// remaining required field a generic writer cannot invent a value for
-/// stops being required) — the refusal the pre-Phase-2 schema produced is
-/// gone, and the equivalence actually holds: `git anchor` writes a `comment`
-/// entity that `gix-comment`'s own typed API reads back as a real
-/// [`gix_comment::Comment`], indistinguishable in content from one
-/// `gix_comment::Comments::add` wrote itself.
-#[test]
-fn add_against_the_real_comment_kind_matches_gix_comment_add() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    let repo = gix::open(path).unwrap();
-    let head = repo.head_id().unwrap().detach();
-    let binding = Binding::Commit {
-        commit: head.into(),
-    };
-
-    // Publishes the `comment` kind's schema as a side effect — the same
-    // publish an empty `git anchor add` would trigger itself, were nothing
-    // published yet.
-    let comments = gix_comment::Comments::open(&repo);
-    let direct_id = comments.add(&binding, "some text", None).unwrap();
-
-    let (out, err, ok) = run(
-        path,
-        None,
-        &["--prefix", "refs/comments", "add", "comment", "some text"],
-    );
-    assert!(ok, "git anchor add comment failed: {err}");
-    let name = out.trim().to_owned();
-
-    // Same ref namespace `<target-hex>/<id-hex>` `gix-comment` itself names
-    // an entity by.
-    let expected_prefix = format!("{head}/");
-    assert!(
-        name.starts_with(&expected_prefix),
-        "entity name {name:?} is not filed under target {head}"
-    );
-    let generic_id_hex = name.strip_prefix(&expected_prefix).unwrap();
-    let generic_id = gix::ObjectId::from_hex(generic_id_hex.as_bytes()).unwrap();
-    assert_ne!(
-        generic_id, direct_id,
-        "two independent adds, two identities"
-    );
-
-    // Same entity: the one `git anchor` wrote decodes through
-    // `gix-comment`'s own typed reader, not merely through the generic
-    // `Value` reader `show` uses.
-    let via_anchor = comments.get(generic_id).unwrap().expect("entity exists");
-    let via_comment = comments.get(direct_id).unwrap().expect("entity exists");
-    assert_eq!(via_anchor.message, via_comment.message);
-    assert_eq!(via_anchor.message, "some text");
-    assert_eq!(via_anchor.binding, binding);
-    assert_eq!(via_anchor.target, head);
-    assert_eq!(via_anchor.state, gix_comment::State::Open);
-    assert_eq!(via_anchor.parent, None);
-    assert!(
-        via_anchor.created_at > 0,
-        "created_at must never be a silently zero-filled sort corruption: {}",
-        via_anchor.created_at
-    );
 }

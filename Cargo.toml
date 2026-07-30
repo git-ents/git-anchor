@@ -2,12 +2,6 @@
 members = [
     "crates/gix-anchor",
     "crates/git-anchor",
-    "crates/gix-comment",
-    "crates/git-comment",
-    "crates/gix-comment-lsp",
     "crates/test-support",
 ]
-# `editors/zed` is a standalone Zed extension crate (wasm32-wasip2, its own
-# `zed_extension_api` dependency tree) — excluded so it resolves on its own.
-exclude = ["editors/zed"]
 resolver = "3"
