@@ -80,6 +80,38 @@ Verdicts: **MATCHES** — code implements the design.
 
 ---
 
+## Status
+
+The table above is the audit as taken.
+This section records what has since been closed against it.
+
+| item | closed by | repo |
+|---|---|---|
+| `X3` identity normal form | `fe4a5f9` | `git-store` |
+| `X4` `Signer` seam | `898482b` | `git-store` |
+| `S2` identity-universe check at registration | `281ace1` | `git-store` |
+| `S1` CLI shape | `1a46310`, `7474c92` | `git-store` |
+| `A1` fingerprints and descriptors | `ad8ef55` | `git-anchor` |
+| `A2` span over post-clean-filter bytes | `ad8ef55` | `git-anchor` |
+| `A3` the three named oracles | `8d7cc5b` | `git-anchor` |
+| `A4` `project` made library-internal | `8d7cc5b` | `git-anchor` |
+| `A5` `rebind pin` schema registration | `8d7cc5b` | `git-anchor` |
+| `A7` anchor id hashed through the normal form | `8d7cc5b` | `git-anchor` |
+| `Q2` effect-stratification pass | `1a8418e` | `git-query` |
+| `Q6` CLI shape | `3be4f21` | `git-query` |
+| `Q1` `bind/5` over one confidence lattice | `ba4362de42aba2d9458a2011f57f1d8a81e2ed40`, `e6bb2be` | `git-query` |
+
+`Q1` landed in two steps.
+The first replaced `bind/7` with `bind/5` but computed both candidate generation and max-selection inside one Rust builtin, which is not the design: with no materialized `cand` relation the engine can hold neither semi-naive incrementality over candidate generation nor per-anchor recomputation of selection, and sub-maximal candidates stay unreachable from the rule language, so no rule can express the orphaning threshold of `ARCHITECTURE.md`'s line 242.
+`e6bb2be` split them — `cand/5` is the monotone host builtin, `bind/5` is a rule in the core module.
+`max{}` has no lowering path in the IR, so selection is the standard stratified-negation encoding of argmax over a numeric confidence column, which needs nothing the engine does not already run.
+
+Deliberately out of scope: `X1` (`git-attest`), `X2` (`git-effect`), `X5` (`Action` record), `X6` (op-log), and `F1`–`F4` (forge).
+`Q1`'s pin leg therefore reads the existing trailer-based claim store rather than a signed attest envelope, and the op-log oracle contributes no candidates for want of a source.
+Still open in scope: `Q3`, `Q4`, `Q5`.
+
+`A10` is unchanged: `ARCHITECTURE.md`'s "Current layout note" still places the comment crates in this repo.
+
 ## Dependency order for closing the gap
 
 1. **`X3`, `X4` in store** — the identity normal form and the `Signer` seam. `A2`, `A7`, `S2`, `X5`, `X6` all sit on top of them.
