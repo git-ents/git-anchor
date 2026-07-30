@@ -52,7 +52,8 @@ Three properties fall out, and they are the point:
 - **The target is derived, never stored.**
   `Binding::target()` computes it, so a stored target cannot disagree with the binding it came from.
 - **A kind is anchorable iff its published schema embeds `Binding`'s shape.**
-  A generic consumer — LSP, query engine, forge — reads a schema out of the registry, locates the binding field by reflection, and projects entities of a kind it was never compiled against.
+  `git anchor add <kind> …` is the first concrete consumer: it reads a schema out of the registry, locates the binding field by structural comparison against `Binding`'s own schema, and writes an entity of a kind it was never compiled against — see `DEVPLAN-boundary.md` Phase 3.
+  The same reflection serves any other generic consumer — LSP, query engine, forge — that projects entities of a kind it was never compiled against.
   This is the whole reason `Binding` is a vocabulary type rather than a per-consumer convention, and it requires embedding `Binding` *inline* rather than by opaque tree id: an opaque oid keeps the shape out of the schema and forfeits the property.
 - **One entity, one history, one commit.**
   Editing a document and moving its binding are the same atomic write, and "a comment without an anchor" does not typecheck.
