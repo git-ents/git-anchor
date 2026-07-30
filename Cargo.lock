@@ -404,7 +404,7 @@ dependencies = [
 [[package]]
 name = "facet-git-tree"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#9309baa000c62e03bb830882d76948783bc15934"
+source = "git+https://github.com/git-ents/git-store#9441357691e08dd6c114636a9e0851e6d0ca5d9f"
 dependencies = [
  "facet",
  "facet-value",
@@ -1223,7 +1223,7 @@ dependencies = [
 [[package]]
 name = "gix-refstore"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#9309baa000c62e03bb830882d76948783bc15934"
+source = "git+https://github.com/git-ents/git-store#9441357691e08dd6c114636a9e0851e6d0ca5d9f"
 dependencies = [
  "gix",
  "gix-hash",
@@ -1293,7 +1293,7 @@ dependencies = [
 [[package]]
 name = "gix-store"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#9309baa000c62e03bb830882d76948783bc15934"
+source = "git+https://github.com/git-ents/git-store#9441357691e08dd6c114636a9e0851e6d0ca5d9f"
 dependencies = [
  "facet",
  "facet-git-tree",
@@ -2318,7 +2318,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",

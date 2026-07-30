@@ -1079,7 +1079,7 @@ mod tests {
         };
         fields
             .values()
-            .any(|field| resolve(schema, field) == Some(canonical_root))
+            .any(|field| resolve(schema, &field.node) == Some(canonical_root))
     }
 
     /// One [`Node::Ref`] indirection into `schema.defs`, or the node itself
