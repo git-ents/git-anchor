@@ -4,7 +4,6 @@
 //! `anchor.retention`.
 
 use facet::Facet;
-use facet_git_tree::ObjectStore;
 use gix::bstr::ByteSlice as _;
 
 use crate::error::{Error, Result};
@@ -146,9 +145,7 @@ impl Anchor {
     ///
     /// [`Error::Serialize`] when the underlying `facet-git-tree` write fails.
     pub fn id(&self) -> Result<AnchorId> {
-        let store = ObjectStore::default();
-        let oid = facet_git_tree::serialize_into(&self.identity, &store)?;
-        Ok(AnchorId::from(oid))
+        crate::handle::hash_identity(&self.identity)
     }
 }
 

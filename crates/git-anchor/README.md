@@ -70,7 +70,7 @@ git anchor remove <kind> <name>...  (alias: rm)       # delete one or more entit
 ```
 
 `--prefix <PREFIX>` (default `refs/anchors`) is a global option selecting the store's ref namespace — pass whatever prefix a `gix-store` consumer publishes under.
-`<name>` is an entity's full name, `<target-hex>/<id-hex>`, exactly as `inject`/`list` printed it.
+`<name>` is an entity's full name, `<anchor-id-hex>/<id-hex>`, exactly as `inject`/`list` printed it.
 
 `inject`'s one remaining rule, beyond the binding field: among the kind's other required fields, exactly one whose shape is `Node::String` is filled from `<text>`; zero or more than one refuses with an error naming the candidates.
 A required field neither the binding nor `<text>` can fill refuses `inject` outright, naming the fields — `--json` is the escape hatch that supplies the whole document explicitly.

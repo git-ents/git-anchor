@@ -291,9 +291,9 @@ fn cmd_inject(repo: &gix::Repository, store: &RepoStore<'_>, args: InjectArgs) -
         .build()
         .with_context(|| format!("kind {kind}: fill remaining required field(s) with --json"))?;
 
-    let target = binding.target();
-    let group = RefPath::from(RefSegment::new(target.to_string()).expect("hex oid is valid"));
-    let message = format!("{kind} {target}");
+    let anchor_id = binding.anchor_id()?;
+    let group = RefPath::from(RefSegment::new(anchor_id.to_string()).expect("hex oid is valid"));
+    let message = format!("{kind} {anchor_id}");
     let commit = dynamic
         .write(&value)
         .message(message)

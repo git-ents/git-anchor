@@ -13,6 +13,7 @@
 //! [`CaptureHandle::anchor_id`] reads it directly off a handle, with no
 //! extra bookkeeping and without decoding `hints` at all.
 
+use facet_git_tree::ObjectStore;
 use gix::ObjectId;
 use gix_object::{Find, Kind};
 
@@ -88,6 +89,19 @@ impl std::str::FromStr for CaptureHandle {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(Self(ObjectId::from_hex(s.as_bytes())?))
     }
+}
+
+/// The content hash of an identity subtree, in a throwaway in-memory store —
+/// the one place that knows an anchor id is `identity`'s hash, never
+/// `hints`'s. [`Anchor::id`](crate::Anchor::id) and [`crate::Binding::anchor_id`]
+/// both delegate here.
+pub(crate) fn hash_identity<T>(identity: &T) -> Result<AnchorId>
+where
+    T: for<'a> facet::Facet<'a>,
+{
+    let store = ObjectStore::default();
+    let oid = facet_git_tree::serialize_into(identity, &store)?;
+    Ok(AnchorId::from(oid))
 }
 
 /// `id`'s tree, asserted to hold exactly one entry — every [`crate::Binding`]

@@ -355,6 +355,57 @@ fn inject_json_supplies_the_document_and_still_gets_the_binding_injected() {
     assert!(out.contains("\"Commit\""), "show --json: {out}");
 }
 
+/// `inject` groups by the anchor id, not by any hint: a committed capture
+/// and a `--worktree` capture of the same span differ only in retained
+/// hints, so they must land in the same group.
+#[test]
+fn committed_and_worktree_captures_inject_into_the_same_group() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+    publish::<Doc>(path, "refs/anchors", "doc");
+
+    let committed_handle = create(path, &["--path", "file.txt", "-L", "5,6"]);
+    let expected_group = anchor_id(path, &committed_handle);
+
+    let (out, err, ok) = run(
+        path,
+        &[
+            "inject",
+            "doc",
+            "committed note",
+            "--anchor",
+            &committed_handle,
+        ],
+    );
+    assert!(ok, "inject failed: {err}");
+    let committed_name = out.trim().to_owned();
+
+    std::fs::write(
+        path.join("file.txt"),
+        numbered(1..=10).replace("line 5", "line five"),
+    )
+    .unwrap();
+    let worktree_handle = create(path, &["--path", "file.txt", "-L", "5,6", "--worktree"]);
+    let (out, err, ok) = run(
+        path,
+        &[
+            "inject",
+            "doc",
+            "worktree note",
+            "--anchor",
+            &worktree_handle,
+        ],
+    );
+    assert!(ok, "inject --worktree failed: {err}");
+    let worktree_name = out.trim().to_owned();
+
+    let committed_group = committed_name.split('/').next().unwrap();
+    let worktree_group = worktree_name.split('/').next().unwrap();
+    assert_eq!(committed_group, expected_group);
+    assert_eq!(committed_group, worktree_group);
+}
+
 // ── list / show / remove, generic over the kind ─────────────────────────
 
 #[test]

@@ -30,7 +30,7 @@ use gix_object::{Find, Write};
 
 use crate::anchor::Anchor;
 use crate::error::{Error, Result};
-use crate::handle::CaptureHandle;
+use crate::handle::{AnchorId, CaptureHandle, hash_identity};
 use crate::oid::Oid;
 use crate::projection::{Projection, project};
 use crate::util::resolve_commit;
@@ -191,11 +191,9 @@ impl Binding {
         }
     }
 
-    /// The primary target object id — what this binding is *about*, and the
-    /// grouping key a ref-based note store files entries under: the commit
-    /// for [`Binding::Commit`], the tree for [`Binding::Tree`], the tree
-    /// *after* the transformation for [`Binding::Delta`], the anchored blob
-    /// for [`Binding::Position`], and the commit for [`Binding::Hybrid`].
+    /// The anchor id: the content hash of this variant's `identity` subtree
+    /// alone, independent of `hints` — the grouping key a ref-based note
+    /// store files entries under.
     ///
     /// # Examples
     ///
@@ -207,16 +205,19 @@ impl Binding {
     ///     identity: CommitIdentity { commit: commit.into() },
     ///     hints: NoHints {},
     /// };
-    /// assert_eq!(binding.target(), commit);
+    /// assert!(binding.anchor_id().is_ok());
     /// ```
-    #[must_use]
-    pub fn target(&self) -> ObjectId {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Serialize`] when the underlying `facet-git-tree` write fails.
+    pub fn anchor_id(&self) -> Result<AnchorId> {
         match self {
-            Self::Commit { identity, .. } => ObjectId::from(identity.commit),
-            Self::Hybrid { identity, .. } => ObjectId::from(identity.commit),
-            Self::Tree { identity, .. } => ObjectId::from(identity.tree),
-            Self::Delta { identity, .. } => ObjectId::from(identity.head_tree),
-            Self::Position(anchor) => ObjectId::from(anchor.hints.blob),
+            Self::Commit { identity, .. } => hash_identity(identity),
+            Self::Hybrid { identity, .. } => hash_identity(identity),
+            Self::Tree { identity, .. } => hash_identity(identity),
+            Self::Delta { identity, .. } => hash_identity(identity),
+            Self::Position(anchor) => anchor.id(),
         }
     }
 

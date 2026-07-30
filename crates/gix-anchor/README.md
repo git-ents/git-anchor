@@ -43,7 +43,7 @@ A [`Binding`] names the object an anchor is attached to:
 - `Commit`, `Tree` — a whole object.
 - `Delta`, `Hybrid` — a change between two trees, or a commit paired with a tree.
 
-`Binding::target()` returns the primary object id, which a consumer typically uses as its own ref-path grouping key.
+`Binding::anchor_id()` returns the identity subtree's oid, which a consumer typically uses as its own ref-path grouping key.
 `Binding` is a **vocabulary type**: embed it as an inline field of your own `Facet` document —
 
 ```rust

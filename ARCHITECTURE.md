@@ -51,8 +51,8 @@ It never learns the word "binding"; the binding rides along because it is part o
 
 Three properties fall out, and they are the point:
 
-- **The target is derived, never stored.**
-  `Binding::target()` computes it, so a stored target cannot disagree with the binding it came from.
+- **The grouping key is derived, never stored.**
+  `Binding::anchor_id()` computes it, so a stored group cannot disagree with the binding it came from.
 - **A kind is anchorable iff its published schema embeds `Binding`'s shape.**
   Locating the field is structural comparison against `Binding`'s own schema, not a per-kind convention.
   The generic machinery this needs — reading a schema out of the registry and writing a value that conforms to it with no compiled Rust type — is `gix-store`'s dynamic (schema-only) write path.
@@ -127,7 +127,7 @@ The document belongs to whoever owns the domain — comments live in `git-forge`
 
 Two things go with it:
 
-- **Target-first ref grouping** (`<target>/<id>`) is a *naming* choice, made by the consumer through `Kind`'s entity names.
+- **Anchor-id-first ref grouping** (`<anchor-id>/<id>`) is a *naming* choice, made by the consumer through `Kind`'s entity names.
 - **Lookup by identity without a target** is an *index*, and `git-query`'s capability.
   A linear scan over ref names is a stopgap; the crate that needs the stopgap owns it.
 
