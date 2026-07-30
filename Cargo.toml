@@ -5,7 +5,3 @@ members = [
     "crates/test-support",
 ]
 resolver = "3"
-
-[patch."https://github.com/git-ents/git-store"]
-facet-git-tree = { path = "../git-store/crates/facet-git-tree" }
-gix-store = { path = "../git-store/crates/gix-store" }
