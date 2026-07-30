@@ -35,13 +35,15 @@ const ANCHOR_PREFIX: &str = "refs/anchors";
 const NOTES_KIND: &str = "notes";
 
 /// The document committed at a note's ref: `body`, the [`Binding`] it is
-/// attached to, an optional `attachment` tree, and opaque `parent`/`state`
-/// bookkeeping — all embedded by tree id so referenced content stays
-/// reachable through the note's own tree (`anchor.retention`).
+/// attached to — embedded inline, so a kind's published schema carries
+/// `Binding`'s own shape rather than an opaque tree id — an optional
+/// `attachment` tree embedded by tree id, and opaque `parent`/`state`
+/// bookkeeping. Content either the binding or the attachment references
+/// stays reachable through the note's own tree (`anchor.retention`).
 #[derive(Facet)]
 struct Note {
     body: Vec<u8>,
-    binding: RawTree,
+    binding: Binding,
     /// Opaque passthrough; must already exist in the repo's object database,
     /// since a [`RawTree`] carries no content of its own.
     attachment: Option<RawTree>,
@@ -220,7 +222,7 @@ where
                     summary.to_owned(),
                     Note {
                         body: body.to_vec(),
-                        binding: RawTree::new(id),
+                        binding: binding.clone(),
                         attachment: attachment.map(RawTree::new),
                         parent: None,
                         state: None,
@@ -249,9 +251,8 @@ where
     ///
     /// # Errors
     ///
-    /// Propagates a [`Binding::serialize_into`] or `Note` serialization
-    /// failure, and any underlying ref-store or object-database failure
-    /// ([`Error::Git`]).
+    /// Propagates a `Note` serialization failure, and any underlying
+    /// ref-store or object-database failure ([`Error::Git`]).
     pub fn create(
         &self,
         binding: &Binding,
@@ -264,7 +265,7 @@ where
         let target = binding.target();
         let note = Note {
             body: body.to_vec(),
-            binding: RawTree::new(binding.serialize_into(self.inner.objects())?),
+            binding: binding.clone(),
             attachment: attachment.map(RawTree::new),
             parent,
             state,
@@ -314,7 +315,7 @@ where
                 message.to_owned(),
                 Note {
                     body: body.to_vec(),
-                    binding: RawTree::new(current.value.binding.oid()),
+                    binding: current.value.binding.clone(),
                     attachment: attachment.map(RawTree::new),
                     parent: parent.clone(),
                     state: state.clone(),
@@ -447,7 +448,7 @@ where
     /// identity `id` its entity name carries.
     fn stored(&self, id: ObjectId, entry: Entry<Note>) -> Result<StoredNote> {
         let note = entry.value;
-        let binding = Binding::deserialize(&note.binding.oid(), self.inner.objects())?;
+        let binding = note.binding;
         Ok(StoredNote {
             id,
             target: binding.target(),
@@ -497,7 +498,7 @@ mod tests {
     use std::collections::VecDeque;
     use std::convert::Infallible;
 
-    use facet_git_tree::ObjectStore;
+    use facet_git_tree::{Node, ObjectStore, Schema, schema_of};
     use gix::actor::Signature;
     use gix::objs::FindExt;
     use gix_store::{ApplyError, MemoryRefStore, RefEdit, RefName};
@@ -887,7 +888,7 @@ mod tests {
     /// [`Store::list`] and [`Store::find`] never see it.
     fn write_note_commit(
         store: &Store<FlakyRefStore, ObjectStore>,
-        binding_id: ObjectId,
+        binding: &Binding,
         body: &[u8],
         created_at: u64,
         parent: Option<ObjectId>,
@@ -906,7 +907,7 @@ mod tests {
         }
         let note = Note {
             body: body.to_vec(),
-            binding: RawTree::new(binding_id),
+            binding: binding.clone(),
             attachment: None,
             parent: None,
             state: None,
@@ -933,7 +934,7 @@ mod tests {
         let winner_created_at = original_created_at.wrapping_add(1_000_000);
         let winner_commit = write_note_commit(
             &store,
-            id,
+            &binding,
             b"concurrent",
             winner_created_at,
             Some(original_tip),
@@ -980,13 +981,10 @@ mod tests {
         let winner_binding = Binding::Commit {
             commit: oid_of(2).into(),
         };
-        let winner_binding_id = winner_binding
-            .serialize_into(store.inner.objects())
-            .unwrap();
         let winner_created_at = 123_456_789;
         let winner_commit = write_note_commit(
             &store,
-            winner_binding_id,
+            &winner_binding,
             "concurrent".as_bytes(),
             winner_created_at,
             Some(original_tip),
@@ -1020,7 +1018,8 @@ mod tests {
         let refname = note_ref(&store, binding.target(), id);
         let original_tip = store.inner.refs().read(&refname).unwrap().unwrap();
 
-        let winner_commit = write_note_commit(&store, id, b"concurrent", 42, Some(original_tip));
+        let winner_commit =
+            write_note_commit(&store, &binding, b"concurrent", 42, Some(original_tip));
         store.inner.refs().push_concurrent(RefEdit::Update {
             name: refname.clone(),
             expected: original_tip,
@@ -1044,5 +1043,92 @@ mod tests {
             .create(&binding, b"body", None, None, None, "msg")
             .unwrap();
         assert_eq!(store.get(id).unwrap().unwrap().body, b"body");
+    }
+
+    // ── binding-keyed identity ──────────────────────────────────────────
+
+    /// [`Store::attach`]'s identity is exactly [`Binding::serialize_into`]'s
+    /// own oid — a consumer-usable convention, not a storage-derived one, per
+    /// `DEVPLAN-boundary.md` Phase 1.
+    #[test]
+    fn binding_keyed_identity_is_the_bindings_own_serialize_into_oid() {
+        let store = memory_store();
+        let binding = Binding::Commit {
+            commit: oid_of(1).into(),
+        };
+        let id = store.attach(&binding, b"note", None).unwrap();
+        let expected = binding.serialize_into(store.inner.objects()).unwrap();
+        assert_eq!(id, expected);
+    }
+
+    // ── reflection: schema embeds Binding's shape ───────────────────────
+
+    /// `DEVPLAN-boundary.md`'s "Locating the binding field by reflection":
+    /// resolve `schema`'s root through one [`Node::Ref`] indirection into
+    /// `defs` to a [`Node::Struct`], then check whether any field, itself
+    /// resolved through the same `defs`, is structurally equal to
+    /// [`schema_of::<Binding>`]'s own root definition. A hand-written shape
+    /// walker would defeat the point — this is `==` on ordinary `Node`
+    /// values.
+    fn is_anchorable(schema: &Schema) -> bool {
+        let canonical = schema_of::<Binding>().expect("Binding has a schema");
+        let canonical_root = resolve(&canonical, &canonical.root).expect("Binding's root resolves");
+
+        let Some(Node::Struct(fields)) = resolve(schema, &schema.root) else {
+            return false;
+        };
+        fields
+            .values()
+            .any(|field| resolve(schema, field) == Some(canonical_root))
+    }
+
+    /// One [`Node::Ref`] indirection into `schema.defs`, or the node itself
+    /// when it is not a `Ref`.
+    fn resolve<'s>(schema: &'s Schema, node: &'s Node) -> Option<&'s Node> {
+        match node {
+            Node::Ref(name) => schema.defs.get(name),
+            other => Some(other),
+        }
+    }
+
+    /// A kind with no [`Binding`] field is not anchorable — the negative
+    /// case [`is_anchorable`] must reject.
+    #[derive(facet::Facet)]
+    struct NotAnchorable {
+        text: String,
+    }
+
+    #[test]
+    fn published_schema_embeds_bindings_shape_by_reflection() {
+        let store = memory_store();
+        let binding = Binding::Commit {
+            commit: oid_of(1).into(),
+        };
+        store.attach(&binding, b"note", None).unwrap();
+
+        let schema = store
+            .notes()
+            .schema()
+            .get()
+            .unwrap()
+            .expect("schema published by attach");
+
+        assert!(
+            is_anchorable(&schema),
+            "notes' published schema must embed Binding's shape"
+        );
+
+        let canonical = schema_of::<Binding>().unwrap();
+        assert_eq!(
+            schema.defs.get("Binding"),
+            canonical.defs.get("Binding"),
+            "concrete form of the same check: the def tables agree exactly"
+        );
+
+        let unrelated = schema_of::<NotAnchorable>().unwrap();
+        assert!(
+            !is_anchorable(&unrelated),
+            "a schema with no Binding field must not be reported anchorable"
+        );
     }
 }
