@@ -49,22 +49,6 @@ struct Plain {
     text: String,
 }
 
-/// The exact shape `crates/gix-anchor/src/store.rs`'s (Phase-2-scoped,
-/// pre-deletion) `Note` publishes as the `notes` kind under `refs/comments`
-/// — reproduced here structurally, rather than depending on that module's
-/// own store type, so this test survives Phase 2 deleting it. Publishing
-/// only the schema (never attaching through it) is enough: `add`'s refusal
-/// path never reads an existing entity.
-#[derive(Facet)]
-struct Note {
-    body: Vec<u8>,
-    binding: Binding,
-    attachment: Option<facet_git_tree::RawTree>,
-    parent: Option<String>,
-    state: Option<String>,
-    created_at: u64,
-}
-
 /// `range.map(|n| "line {n}\n")` concatenated — a small multi-line fixture
 /// file to anchor into.
 fn numbered(range: std::ops::RangeInclusive<u32>) -> String {
@@ -566,81 +550,73 @@ fn prefix_selects_a_disjoint_store() {
     assert!(out.contains("elsewhere"), "show output: {out}");
 }
 
-// ── documents the upstream-blocked equivalence gap ───────────────────────
+// ── the git-anchor / git-comment equivalence ─────────────────────────────
 
 /// `DEVPLAN-boundary.md` Phase 3 opens with `git anchor add comment "some
-/// text"` being `git comment add "some text"` "by another name". Applied to
-/// the note document (`crates/gix-anchor/src/store.rs`, the kind
-/// `gix-comment` still publishes pre-Phase-2 under `refs/comments` as
-/// `notes`), the plan reasons that excluding `binding` and the two
-/// `Optional` fields (`parent`, `state`) leaves `body` and `created_at`,
-/// "only `body` is `Node::String`", so refusal comes down to `created_at`
-/// alone having no way to be filled.
-///
-/// That is not what the schema the running code actually publishes says.
-/// `Note::body` is `Vec<u8>`, and `facet-git-tree` special-cases any byte
-/// sequence to `Node::Bytes` before it ever reaches struct-field handling
-/// (`crates/facet-git-tree/src/schema/mod.rs`'s `is_byte_seq` check) — `body`
-/// is `Node::Bytes`, not `Node::String`. Consequence 1's positional-argument
-/// rule, as written, only ever matches `Node::String`
-/// (`crates/git-anchor/src/main.rs`'s `unique_string_field`), by design —
-/// `facet-git-tree` "has no separate 'text' leaf; `String` is it", and this
-/// phase does not re-litigate that scope to also accept `Bytes`. So the
-/// refusal here does not even reach `created_at`: zero fields qualify as the
-/// positional candidate at all, not because nothing can fill `created_at`
-/// specifically, but because nothing in the schema is `Node::String` in the
-/// first place. Both gaps stand between here and the equivalence Phase 3
-/// opens with; this test documents the one this code actually hits first.
+/// text"` being `git comment add "some text"` "by another name". With Phase
+/// 2's three shape fixes in place — `body: String` (so the positional
+/// argument has a `Node::String` field to land on at all), `state:
+/// Option<State>`, and `created_at`'s `#[facet(default)]` (so the one
+/// remaining required field a generic writer cannot invent a value for
+/// stops being required) — the refusal the pre-Phase-2 schema produced is
+/// gone, and the equivalence actually holds: `git anchor` writes a `comment`
+/// entity that `gix-comment`'s own typed API reads back as a real
+/// [`gix_comment::Comment`], indistinguishable in content from one
+/// `gix_comment::Comments::add` wrote itself.
 #[test]
-fn add_against_the_real_comment_kind_refuses_before_reaching_created_at() {
+fn add_against_the_real_comment_kind_matches_gix_comment_add() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
 
-    publish::<Note>(path, "refs/comments", "notes");
+    let repo = gix::open(path).unwrap();
+    let head = repo.head_id().unwrap().detach();
+    let binding = Binding::Commit {
+        commit: head.into(),
+    };
 
-    let (_, err, ok) = run(
+    // Publishes the `comment` kind's schema as a side effect — the same
+    // publish an empty `git anchor add` would trigger itself, were nothing
+    // published yet.
+    let comments = gix_comment::Comments::open(&repo);
+    let direct_id = comments.add(&binding, "some text", None).unwrap();
+
+    let (out, err, ok) = run(
         path,
         None,
-        &["--prefix", "refs/comments", "add", "notes", "some text"],
+        &["--prefix", "refs/comments", "add", "comment", "some text"],
     );
+    assert!(ok, "git anchor add comment failed: {err}");
+    let name = out.trim().to_owned();
+
+    // Same ref namespace `<target-hex>/<id-hex>` `gix-comment` itself names
+    // an entity by.
+    let expected_prefix = format!("{head}/");
     assert!(
-        !ok,
-        "git anchor add notes should refuse: no positional-fillable field exists"
+        name.starts_with(&expected_prefix),
+        "entity name {name:?} is not filed under target {head}"
     );
+    let generic_id_hex = name.strip_prefix(&expected_prefix).unwrap();
+    let generic_id = gix::ObjectId::from_hex(generic_id_hex.as_bytes()).unwrap();
+    assert_ne!(
+        generic_id, direct_id,
+        "two independent adds, two identities"
+    );
+
+    // Same entity: the one `git anchor` wrote decodes through
+    // `gix-comment`'s own typed reader, not merely through the generic
+    // `Value` reader `show` uses.
+    let via_anchor = comments.get(generic_id).unwrap().expect("entity exists");
+    let via_comment = comments.get(direct_id).unwrap().expect("entity exists");
+    assert_eq!(via_anchor.message, via_comment.message);
+    assert_eq!(via_anchor.message, "some text");
+    assert_eq!(via_anchor.binding, binding);
+    assert_eq!(via_anchor.target, head);
+    assert_eq!(via_anchor.state, gix_comment::State::Open);
+    assert_eq!(via_anchor.parent, None);
     assert!(
-        err.contains("does not accept a positional argument"),
-        "stderr: {err}"
+        via_anchor.created_at > 0,
+        "created_at must never be a silently zero-filled sort corruption: {}",
+        via_anchor.created_at
     );
-}
-
-/// The narrower claim Consequence 1 makes still holds once the positional
-/// argument is out of the picture entirely: `created_at` really is required
-/// and really has no `#[facet(default)]`, so even the `--json` escape hatch
-/// still needs a value supplied for it explicitly — this crate cannot invent
-/// one, by design (`DEVPLAN-boundary.md` rejects zero-filling it).
-#[test]
-fn add_against_the_real_comment_kind_via_json_still_needs_created_at() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-
-    publish::<Note>(path, "refs/comments", "notes");
-
-    // Every field but `created_at` supplied explicitly, so the write's own
-    // refusal can only be about the one field this crate has no way to fill.
-    let (_, err, ok) = run(
-        path,
-        None,
-        &[
-            "--prefix",
-            "refs/comments",
-            "add",
-            "notes",
-            "--json",
-            "{\"body\": \"some text\", \"attachment\": null, \"parent\": null, \"state\": null}",
-        ],
-    );
-    assert!(!ok, "omitting created_at from --json should still refuse");
-    assert!(err.contains("created_at"), "stderr: {err}");
 }

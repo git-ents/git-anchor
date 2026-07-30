@@ -650,6 +650,7 @@ dependencies = [
  "facet-value",
  "gix",
  "gix-anchor",
+ "gix-comment",
  "gix-store",
  "tempfile",
  "test-support",
@@ -739,7 +740,6 @@ dependencies = [
  "facet-git-tree",
  "gix",
  "gix-object",
- "gix-store",
  "proptest",
  "rstest",
  "tempfile",
@@ -798,8 +798,11 @@ dependencies = [
 name = "gix-comment"
 version = "0.1.0"
 dependencies = [
+ "facet",
+ "facet-git-tree",
  "gix",
  "gix-anchor",
+ "gix-store",
  "rstest",
  "tempfile",
  "thiserror",

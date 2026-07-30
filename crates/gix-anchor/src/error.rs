@@ -62,27 +62,6 @@ pub enum Error {
     /// `gix` object store the codec was given.
     #[error(transparent)]
     Deserialize(#[from] facet_git_tree::DeserializeError),
-    /// Any underlying failure from [`crate::Store`]'s ref-store, committer,
-    /// or object-database backend, collapsed to a single variant with the
-    /// original error preserved as its source.
-    #[error(transparent)]
-    Git(Box<dyn std::error::Error + Send + Sync + 'static>),
-}
-
-impl Error {
-    /// Collapse a `gix` error into [`Error::Git`], preserving it as the source.
-    pub(crate) fn git<E>(err: E) -> Self
-    where
-        E: Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
-    {
-        Error::Git(err.into())
-    }
-}
-
-impl From<gix_store::Error> for Error {
-    fn from(err: gix_store::Error) -> Self {
-        Error::git(err)
-    }
 }
 
 /// The `Result` alias every `gix-anchor` operation returns.

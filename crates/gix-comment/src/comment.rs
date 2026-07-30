@@ -1,31 +1,35 @@
-//! [`Comment`] and [`Comments`]: a thin, opinionated layer over
-//! `gix-anchor`'s note [`Store`](gix_anchor::Store).
+//! [`Comment`] and [`Comments`]: a thin, opinionated document over
+//! `gix-anchor`'s [`Binding`], persisted through this crate's own
+//! `gix-store` layout under `refs/comments`.
 //!
-//! A comment *is* a note. Its message is the note body; its author and
-//! timestamp are the storage commit's — a note is a git commit, so the
-//! identity and time git already records for every commit are exactly what a
-//! comment needs, with nothing stored twice. An optional raw-tree attachment
-//! rides along in the note's `attachment` slot, embedded so it stays
-//! reachable through the comment's own ref.
+//! A comment *is* a document: a message, the [`Binding`] it is about, and a
+//! resolvable lifecycle. Its author and timestamp are the storage commit's —
+//! a comment is a git commit, so the identity and time git already records
+//! for every commit are exactly what a comment needs, with nothing stored
+//! twice. An optional raw-tree attachment rides along in the document's
+//! `attachment` slot, embedded so it stays reachable through the comment's
+//! own ref.
 //!
-//! Every comment is genesis-keyed ([`Store::create`]/[`Store::update`]), not
-//! binding-keyed: its identity is its own storage commit's oid, never the
-//! binding's. [`Comments::add`] and [`Comments::reply`] therefore always
-//! create a *new* comment, even when several comments share a binding — a
-//! reply is about the same binding as the comment it replies to, and two
-//! people can comment on the same line, so binding identity alone cannot
-//! tell those apart. [`Comment::parent`] links a reply to what it replies
-//! to, and [`Comments::thread`] walks that link into a tree; [`State`] gives
-//! a comment a resolvable lifecycle on top of the same version history
-//! [`Comments::edit`] already provides.
+//! Every comment is genesis-keyed: its identity is its own storage commit's
+//! oid, never the binding's. [`Comments::add`] and [`Comments::reply`]
+//! therefore always create a *new* comment, even when several comments share
+//! a binding — a reply is about the same binding as the comment it replies
+//! to, and two people can comment on the same line, so binding identity
+//! alone cannot tell those apart. [`Comment::parent`] links a reply to what
+//! it replies to, and [`Comments::thread`] walks that link into a tree;
+//! [`State`] gives a comment a resolvable lifecycle on top of the same
+//! version history [`Comments::edit`] already provides.
 
 use std::collections::{HashMap, HashSet};
 
+use facet::Facet;
 use gix::ObjectId;
 use gix::bstr::ByteSlice as _;
-use gix_anchor::{Binding, RefPrefix, RepoStore, StoredNote};
+use gix_anchor::Binding;
+use gix_store::{Entry, RefPrefix};
 
 use crate::error::{Error, Result};
+use crate::store::{self, Document};
 
 /// Who wrote a comment and when — read back from its storage commit's author
 /// signature (`git`'s own `author`/`timestamp`), never stored separately.
@@ -39,38 +43,17 @@ pub struct Author {
     pub time: gix::date::Time,
 }
 
-/// A comment's lifecycle state — the store's opaque `state` string
-/// ([`gix_anchor::StoredNote::state`]), given a fixed two-value vocabulary at
-/// this layer. Anything other than the literal `"resolved"` — including
-/// `None`, and any string a future version of this crate does not yet
-/// recognize — reads as [`State::Open`], so an old reader never mistakes an
-/// unrecognized state for resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A comment's lifecycle state — a schema-typed field of the stored
+/// document, not a free string: `facet-git-tree` rejects a variant not in
+/// this vocabulary at write time, for every writer, not just this crate's
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[repr(u8)]
 pub enum State {
     /// Awaiting a response, or simply not (yet) marked resolved.
     Open,
     /// Marked resolved by [`Comments::resolve`].
     Resolved,
-}
-
-impl State {
-    /// The store's opaque string for this state.
-    #[must_use]
-    fn as_store_str(self) -> &'static str {
-        match self {
-            State::Open => "open",
-            State::Resolved => "resolved",
-        }
-    }
-
-    /// Recover a [`State`] from the store's opaque string, defaulting to
-    /// [`State::Open`] for `None` or anything unrecognized.
-    fn from_store(state: Option<&str>) -> State {
-        match state {
-            Some("resolved") => State::Resolved,
-            _ => State::Open,
-        }
-    }
 }
 
 /// A comment attached to a Git object: a `message`, an [`Author`] (name,
@@ -89,7 +72,7 @@ pub struct Comment {
     pub target: ObjectId,
     /// What the comment is about.
     pub binding: Binding,
-    /// The comment text (the note body, decoded lossily as UTF-8).
+    /// The comment text (the document's `body`).
     pub message: String,
     /// An optional attached tree's oid — arbitrary content hung off the
     /// comment, kept reachable through its ref (`anchor.retention`).
@@ -108,12 +91,11 @@ pub struct Comment {
     /// for [`Comments::get`]/[`Comments::list`], or a past version for
     /// [`Comments::get_at`].
     pub commit: ObjectId,
-    /// [`gix_anchor::StoredNote::created_at`]: nanoseconds since the Unix
-    /// epoch, best-effort, fixed when the comment was first created and
-    /// unchanged by `edit`/`append`/`resolve`/`reopen`. [`Comments::thread`]'s
-    /// tiebreaker for two replies whose `author.time` lands in the same
-    /// second (git's own resolution); not a display timestamp — use
-    /// `author.time` for that.
+    /// Nanoseconds since the Unix epoch, best-effort, fixed when the comment
+    /// was first created and unchanged by `edit`/`resolve`/`reopen`.
+    /// [`Comments::thread`]'s tiebreaker for two replies whose `author.time`
+    /// lands in the same second (git's own resolution); not a display
+    /// timestamp — use `author.time` for that.
     pub created_at: u64,
 }
 
@@ -130,26 +112,23 @@ pub struct Thread {
     pub replies: Vec<Comment>,
 }
 
-/// A store of [`Comment`]s over a `gix` repository, built on
-/// `gix-anchor`'s note [`Store`], genesis-keyed under `refs/comments`: every
-/// [`Comments::add`]/[`Comments::reply`] call creates a new comment identity,
-/// each editable with full version history, each version authored and
-/// timestamped by whoever committed it.
+/// A store of [`Comment`]s over a `gix` repository, genesis-keyed under
+/// `refs/comments`: every [`Comments::add`]/[`Comments::reply`] call creates
+/// a new comment identity, each editable with full version history, each
+/// version authored and timestamped by whoever committed it.
 pub struct Comments<'r> {
     repo: &'r gix::Repository,
-    store: RepoStore<'r>,
+    store: store::RepoStore<'r>,
 }
 
 impl<'r> Comments<'r> {
-    /// Open a comment store over `repo`, rooted at `refs/comments` — its own
-    /// namespace, distinct from `gix-anchor`'s own `refs/anchors`, though
-    /// both share the same underlying [`Store`] engine.
+    /// Open a comment store over `repo`, rooted at `refs/comments`.
     #[must_use]
     pub fn open(repo: &'r gix::Repository) -> Comments<'r> {
         let prefix = RefPrefix::new("refs/comments").expect("valid ref prefix");
         Comments {
             repo,
-            store: RepoStore::with_prefix(repo, prefix),
+            store: store::RepoStore::with_prefix(repo, prefix),
         }
     }
 
@@ -169,7 +148,7 @@ impl<'r> Comments<'r> {
     ///
     /// # Errors
     ///
-    /// Propagates a [`Store::create`] failure.
+    /// Propagates a write failure.
     pub fn add(
         &self,
         binding: &Binding,
@@ -177,14 +156,14 @@ impl<'r> Comments<'r> {
         attachment: Option<ObjectId>,
     ) -> Result<ObjectId> {
         let summary = summary_of(message);
-        Ok(self.store.create(
+        self.store.create(
             binding,
-            message.as_bytes(),
+            message,
             attachment,
             None,
-            Some(State::Open.as_store_str().to_owned()),
+            Some(State::Open),
             summary,
-        )?)
+        )
     }
 
     /// Reply to an existing comment: a new comment, [`Comment::parent`] set
@@ -196,7 +175,7 @@ impl<'r> Comments<'r> {
     /// # Errors
     ///
     /// [`Error::Resolve`] when `parent_id` names no existing comment.
-    /// Otherwise propagates a [`Store::create`] failure.
+    /// Otherwise propagates a write failure.
     pub fn reply(
         &self,
         parent_id: ObjectId,
@@ -207,27 +186,27 @@ impl<'r> Comments<'r> {
             return Err(Error::Resolve(parent_id.to_string()));
         };
         let summary = summary_of(message);
-        Ok(self.store.create(
+        self.store.create(
             &parent.binding,
-            message.as_bytes(),
+            message,
             attachment,
             Some(parent_id.to_string()),
-            Some(State::Open.as_store_str().to_owned()),
+            Some(State::Open),
             summary,
-        )?)
+        )
     }
 
     /// Every comment, or only those filed under `target`, oldest-id first.
     ///
     /// # Errors
     ///
-    /// Propagates a [`Store::list`] failure or a storage-commit read failure
-    /// while recovering author and timestamp.
+    /// Propagates a list failure or a storage-commit read failure while
+    /// recovering author and timestamp.
     pub fn list(&self, target: Option<ObjectId>) -> Result<Vec<Comment>> {
         self.store
             .list(target)?
             .into_iter()
-            .map(|note| self.hydrate(note))
+            .map(|(id, entry)| self.hydrate(id, entry))
             .collect()
     }
 
@@ -258,10 +237,10 @@ impl<'r> Comments<'r> {
     ///
     /// # Errors
     ///
-    /// Propagates a [`Store::get`] failure or a storage-commit read failure.
+    /// Propagates a read failure or a storage-commit read failure.
     pub fn get(&self, id: ObjectId) -> Result<Option<Comment>> {
         match self.store.get(id)? {
-            Some(note) => Ok(Some(self.hydrate(note)?)),
+            Some(entry) => Ok(Some(self.hydrate(id, entry)?)),
             None => Ok(None),
         }
     }
@@ -319,11 +298,10 @@ impl<'r> Comments<'r> {
     ///
     /// # Errors
     ///
-    /// Propagates a [`Store::get_at`] failure or a storage-commit read
-    /// failure.
+    /// Propagates a read failure or a storage-commit read failure.
     pub fn get_at(&self, id: ObjectId, commit: ObjectId) -> Result<Comment> {
-        let note = self.store.get_at(id, commit)?;
-        self.hydrate(note)
+        let entry = self.store.get_at(commit)?;
+        self.hydrate(id, entry)
     }
 
     /// Replace a comment's message and/or attachment, committing a new
@@ -336,7 +314,7 @@ impl<'r> Comments<'r> {
     ///
     /// [`Error::Resolve`] when `id` names no existing comment — edit names
     /// an existing comment, unlike [`Comments::add`], which always creates
-    /// one. Otherwise propagates a [`Store::update`] failure.
+    /// one. Otherwise propagates a write failure.
     pub fn edit(
         &self,
         id: ObjectId,
@@ -347,14 +325,14 @@ impl<'r> Comments<'r> {
             return Err(Error::Resolve(id.to_string()));
         };
         let summary = summary_of(message);
-        Ok(self.store.update(
+        self.store.update(
             id,
-            message.as_bytes(),
+            message,
             attachment,
             existing.parent.map(|parent| parent.to_string()),
-            Some(existing.state.as_store_str().to_owned()),
+            Some(existing.state),
             summary,
-        )?)
+        )
     }
 
     /// Mark a comment resolved, its message and attachment unchanged — a new
@@ -364,7 +342,7 @@ impl<'r> Comments<'r> {
     /// # Errors
     ///
     /// [`Error::Resolve`] when `id` names no existing comment. Otherwise
-    /// propagates a [`Store::update`] failure.
+    /// propagates a write failure.
     pub fn resolve(&self, id: ObjectId) -> Result<ObjectId> {
         self.set_state(id, State::Resolved, "resolve")
     }
@@ -375,7 +353,7 @@ impl<'r> Comments<'r> {
     /// # Errors
     ///
     /// [`Error::Resolve`] when `id` names no existing comment. Otherwise
-    /// propagates a [`Store::update`] failure.
+    /// propagates a write failure.
     pub fn reopen(&self, id: ObjectId) -> Result<ObjectId> {
         self.set_state(id, State::Open, "reopen")
     }
@@ -385,18 +363,18 @@ impl<'r> Comments<'r> {
     ///
     /// # Errors
     ///
-    /// Propagates a [`Store::history`] failure.
+    /// Propagates a history-read failure.
     pub fn history(&self, id: ObjectId) -> Result<Vec<ObjectId>> {
-        Ok(self.store.history(id)?)
+        self.store.history(id)
     }
 
     /// Delete a comment. Returns whether it existed.
     ///
     /// # Errors
     ///
-    /// Propagates a [`Store::remove`] failure.
+    /// Propagates a removal failure.
     pub fn remove(&self, id: ObjectId) -> Result<bool> {
-        Ok(self.store.remove(id)?)
+        self.store.remove(id)
     }
 
     /// [`Comments::resolve`]/[`Comments::reopen`]'s shared implementation:
@@ -406,23 +384,23 @@ impl<'r> Comments<'r> {
         let Some(existing) = self.get(id)? else {
             return Err(Error::Resolve(id.to_string()));
         };
-        Ok(self.store.update(
+        self.store.update(
             id,
-            existing.message.as_bytes(),
+            &existing.message,
             existing.attachment,
             existing.parent.map(|parent| parent.to_string()),
-            Some(state.as_store_str().to_owned()),
+            Some(state),
             summary,
-        )?)
+        )
     }
 
-    /// Recover a [`Comment`] from a [`StoredNote`], reading the author and
-    /// timestamp from the note's storage commit — the one place a comment's
-    /// identity and time come from.
-    fn hydrate(&self, note: StoredNote) -> Result<Comment> {
+    /// Recover a [`Comment`] from its stored [`Document`], reading the
+    /// author and timestamp from the storage commit — the one place a
+    /// comment's identity and time come from.
+    fn hydrate(&self, id: ObjectId, entry: Entry<Document>) -> Result<Comment> {
         let commit = self
             .repo
-            .find_commit(note.commit)
+            .find_commit(entry.commit)
             .map_err(|error| Error::Commit(error.to_string()))?;
         let signature = commit
             .author()
@@ -434,23 +412,24 @@ impl<'r> Comments<'r> {
             // the whole read: the comment text is still worth showing.
             time: signature.time().unwrap_or_default(),
         };
-        let parent = match note.parent {
+        let document = entry.value;
+        let parent = match document.parent {
             Some(hex) => Some(
                 ObjectId::from_hex(hex.as_bytes()).map_err(|_error| Error::InvalidParent(hex))?,
             ),
             None => None,
         };
         Ok(Comment {
-            id: note.id,
-            target: note.target,
-            binding: note.binding,
-            message: String::from_utf8_lossy(&note.body).into_owned(),
-            attachment: note.attachment,
+            id,
+            target: document.binding.target(),
+            binding: document.binding,
+            message: document.body,
+            attachment: document.attachment.map(|attachment| attachment.oid()),
             author,
             parent,
-            state: State::from_store(note.state.as_deref()),
-            commit: note.commit,
-            created_at: note.created_at,
+            state: document.state.unwrap_or(State::Open),
+            commit: entry.commit,
+            created_at: document.created_at,
         })
     }
 }
@@ -459,9 +438,8 @@ impl<'r> Comments<'r> {
 /// so a comment is self-describing in plain git (`git log --oneline
 /// refs/comments/…`) — falling back to a fixed placeholder on the
 /// (practically unreachable, since a real comment has real content) chance
-/// every line is blank, since [`gix_anchor::Store::create`] and
-/// [`gix_anchor::Store::update`] require a summary rather than defaulting
-/// one themselves.
+/// every line is blank, since a comment's own write path requires a summary
+/// rather than defaulting one itself.
 fn summary_of(message: &str) -> &str {
     message
         .lines()
@@ -516,8 +494,9 @@ mod tests {
         };
         run(&["init", "-q"]);
         // Persist the identity in the repo config (not just `-c` on one
-        // command), so gix's own `commit` — which writes the *note* commit,
-        // and thus the comment's author — resolves the same Ada identity.
+        // command), so gix's own `commit` — which writes the *comment*
+        // commit, and thus the comment's author — resolves the same Ada
+        // identity.
         run(&["config", "user.name", "Ada"]);
         run(&["config", "user.email", "ada@example.com"]);
         std::fs::write(dir.path().join("file.txt"), content).unwrap();
@@ -657,7 +636,7 @@ mod tests {
     }
 
     /// Two calls to `add` on the same binding create two distinct comments —
-    /// no collision, unlike the old binding-keyed identity.
+    /// no collision, unlike a binding-keyed identity.
     #[test]
     fn add_twice_on_the_same_binding_creates_two_distinct_comments() {
         let dir = repo(&numbered(1..=5));

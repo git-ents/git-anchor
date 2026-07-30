@@ -1,18 +1,18 @@
-//! Comments attached to Git objects, built on [`gix_anchor`].
+//! Comments attached to Git objects, built on [`gix_anchor`]'s [`Binding`]
+//! and this crate's own `gix-store` persistence under `refs/comments`.
 //!
 //! A comment is the simplest possible client of an anchor: a message pinned
 //! to whatever a [`Binding`] names — a commit, a tree, or a durable
 //! line-range position in a blob — that *follows the content* across history
-//! exactly as the anchor it rides on does. This crate adds no new persistence
-//! of its own; it is a thin, opinionated view over `gix-anchor`'s note
-//! [`Store`](gix_anchor::Store):
+//! exactly as the anchor it rides on does.
 //!
-//! - The comment **message** is the note body.
+//! - The comment **message** is the document's body.
 //! - The comment **author** and **timestamp** are the storage commit's — a
-//!   note is a git commit, so git already records who wrote it and when; this
-//!   crate reads those back rather than storing them a second time.
-//! - An optional **attachment** is an arbitrary tree, embedded in the note so
-//!   it stays reachable through the comment's own ref (`anchor.retention`).
+//!   comment is a git commit, so git already records who wrote it and when;
+//!   this crate reads those back rather than storing them a second time.
+//! - An optional **attachment** is an arbitrary tree, embedded in the
+//!   document so it stays reachable through the comment's own ref
+//!   (`anchor.retention`).
 //!
 //! Everything a caller needs to say what a comment is *about* — [`Binding`],
 //! [`capture`], [`capture_worktree`], line ranges, and projection — is
@@ -51,6 +51,7 @@
 
 mod comment;
 mod error;
+mod store;
 
 pub use comment::{Author, Comment, Comments, State, Thread};
 pub use error::{Error, Result};

@@ -20,5 +20,6 @@ anyhow = "1"
 
 [dev-dependencies]
 facet = { version = "0.50.0-rc.0", features = ["reflect"] }
+gix-comment = { path = "../gix-comment" }
 tempfile = "3"
 test-support = { path = "../test-support" }
