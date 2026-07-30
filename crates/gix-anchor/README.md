@@ -4,7 +4,8 @@ Attach arbitrary content to Git objects — and, for a blob, to a line range wit
 
 An **anchor** is a durable pointer into source: a blob, an optional 1-based inclusive line range, and the commit it was captured against.
 Anchors resolve and *project* independently of any consumer — a comment is merely the first client; reviews, TODO trackers, and blame overlays reuse the same mechanism.
-The library is `gix`-native and oid-in/oid-out: it performs its own object reads and ref writes over a [`gix::Repository`], with no materialized worktree required for diffs.
+The library is `gix`-native and oid-in/oid-out: it performs its own object reads over a [`gix::Repository`], with no materialized worktree required for diffs.
+It persists nothing itself — no ref, no commit; persistence belongs to the consumer, over `gix-store`.
 
 See [`docs/specification.adoc`](../../docs/specification.adoc) for the normative requirements this crate implements (`anchor.definition`, `anchor.immutable`, `anchor.retention`, `anchor.projection`, `anchor.fuzzy-fallback`, `anchor.working-tree`, `anchor.tree-pair-diff`).
 
@@ -32,43 +33,17 @@ match project(&repo, &anchor, "main")? {
 Projection follows renames and works between any two commits — forwards, backwards, or across unrelated history — as long as the anchored commit still exists.
 Once that commit is garbage-collected, projection degrades to fuzzily matching a retained *context* blob against the target, recovering the same four outcomes approximately rather than exactly.
 
-## Store: notes attached to objects
+## `Binding`: what can be anchored to
 
-`Store` persists an anchor together with an arbitrary content *body* under `refs/anchors/data/notes/<target>/<binding-id>`, with `git notes`-style semantics: one editable note per anchored target, and every re-attach records a new version on the same ref, so history comes for free.
-
-```rust
-use gix_anchor::{capture, Binding, Store};
-
-let repo = gix::discover(".")?;
-let store = Store::open(&repo);
-
-// Attach a note to a line range …
-let anchor = capture(&repo, "HEAD", "src/lib.rs", None)?;
-let id = store.attach(&Binding::Position(anchor), b"needs a doc comment", None)?;
-
-// … read it back, with the anchor and body recovered.
-let note = store.get(id)?.expect("just attached");
-assert_eq!(note.body, b"needs a doc comment");
-
-// List, or filter to one target object; remove when done.
-for note in store.list(None)? {
-    println!("{} -> {}", note.id, String::from_utf8_lossy(&note.body));
-}
-store.remove(id)?;
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-The stored note embeds the anchor's serialized tree by object id, so the anchored blob and its context stay reachable from the note's own tree — the `anchor.retention` requirement — never via a gitlink.
-
-## What can be a target
-
-A [`Binding`] names the object a note is attached to:
+A [`Binding`] names the object an anchor is attached to:
 
 - `Position(Anchor)` — a blob, optionally a line range within it.
 - `Commit`, `Tree` — a whole object.
 - `Delta`, `Hybrid` — a change between two trees, or a commit paired with a tree.
 
-`Binding::target()` returns the primary object id, which is also the ref-path grouping key in the store.
+`Binding::target()` returns the primary object id, which a consumer typically uses as its own ref-path grouping key.
+`Binding` is a **vocabulary type**: embed it as an inline field of your own `Facet` document, and a generic consumer (`git anchor`, an LSP, a query engine) can discover that the kind is anchorable by structural comparison against `Binding`'s own schema, with no per-kind convention.
+See [`gix-comment`](../gix-comment) for the first consumer, and [`ARCHITECTURE.md`](../../ARCHITECTURE.md) for why the field is embedded inline rather than referenced by tree id.
 
 ## Tree-pair diff
 

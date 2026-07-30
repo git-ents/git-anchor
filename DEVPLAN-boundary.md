@@ -1,5 +1,9 @@
 # Crate boundaries — make `gix-anchor` storage-free
 
+**Status: done (2026-07-30).**
+Phases 1–4 all shipped; each phase below carries a *Shipped* note where the outcome differs from the plan.
+One divergence spans phases: Phase 3 landed before Phase 2 (see Phase 2's note), so the two are numbered by design intent, not by commit order.
+
 `DEVPLAN-storage.md` moved the storage *engine* out of `gix-anchor` and into `gix-store`.
 This plan moves the storage *concern* out too.
 
@@ -20,6 +24,9 @@ Same standing as `DEVPLAN-storage.md`: nothing outside this repo family consumes
 
 ## Phase 1 — Embed `Binding` inline, not by tree id
 
+**Shipped, 2026-07-30 (`f18e04e`).**
+As planned: `Note.binding` became an inline `Binding` field in `gix-anchor/src/store.rs`, and binding-keyed identity (`attach`) stayed available as a consumer convention pending Phase 2's decision — which dropped it outright rather than moving it, since genesis-keyed `gix-comment` never needed it.
+
 `Note.binding` is a `RawTree` today: an opaque oid pointing at the binding's serialized tree.
 That keeps `Binding`'s shape *out* of the document's published schema, which forfeits the property that makes `Binding` worth having as a vocabulary type — a generic consumer cannot discover by reflection that a kind is anchorable.
 
@@ -39,6 +46,12 @@ Two consequences to settle while writing it:
    There is no data to preserve; do not write a migration.
 
 ## Phase 2 — Move the document into `gix-comment`
+
+**Shipped, 2026-07-30 (`2bb8f2f`), after Phase 3, not before.**
+This plan's own numbering assumed Phase 2 lands first, since it is the one that deletes `gix_anchor::Store`.
+In fact `4014fff` (Phase 3, making `git anchor` generic) shipped first: `git-anchor`'s `main.rs` was still calling `gix_anchor::Store` directly, so deleting `Store` before the CLI stopped depending on it would have left the workspace uncompilable for the length of Phase 2's own commit.
+Making the CLI generic over `gix-store` first, then deleting `Store` once nothing referenced it, kept every commit on `main` buildable.
+The phases are numbered by design dependency (Phase 3's equivalence claim needs Phase 2's document shape to be true), not by ship order.
 
 `gix-comment` gains a `gix-store` dependency and defines its own document:
 
@@ -61,6 +74,12 @@ Port `store.rs`'s test module rather than rewriting it.
 `FlakyRefStore`, `SplitIdentity`, and the CAS-retry tests are testing `gix-store`'s retry behavior through a consumer, which is still worth doing — from `gix-comment` now.
 
 ## Phase 3 — `git anchor` is generic over registered schemas
+
+**Shipped, 2026-07-30 (`fcc7765`, `4014fff`), before Phase 2, not after — see Phase 2's note.**
+The equivalence this phase opens with was, as written below, a goal rather than something Phase 3 alone delivered: it needed three document-shape changes this plan had not enumerated up front.
+`fcc7765` closed the two upstream gaps named below (a field-level `has_default` marker on the wire `Schema`, and a struct write that omits a schema-required field now erroring instead of silently succeeding).
+On top of that, `gix-comment`'s document needed `body: String` (so the positional argument has a `Node::String` field to land on — Phase 2's design already had this), `state: Option<State>` (Phase 2's design already had this too), and `created_at`'s `#[facet(default = now_nanos())]` (the concrete field-default marker Consequence 1 below named as unscheduled upstream work, now scheduled and landed alongside it).
+With all three in place, `add_against_the_real_comment_kind_matches_gix_comment_add` (`crates/git-anchor/tests/cli.rs`) proves `git anchor add comment "some text"` and `git comment add "some text"` write entities `gix-comment`'s own typed reader cannot tell apart.
 
 `git anchor add/list/show/remove` stop being a hand-rolled client of the `Store` Phase 2 deletes and become a thin driver over whatever kind the caller names.
 `git anchor add comment "some text"` is `git comment add "some text"` by another name — same write, same ref namespace, same schema — because `git anchor` reads `comment`'s published schema out of the registry and writes an entity of it without ever having been compiled against `gix_comment::Comment`.
@@ -151,10 +170,18 @@ Whether `created_at` should exist in the document at all: keep it, and close the
 
 Phase 3 no longer blocks Phase 2: Phase 2 deletes `gix_anchor::Store`, and Phase 3 is the CLI catching up to that afterward, on its own timeline, over `gix-store` directly rather than through anything `gix-anchor` re-exports.
 
+**This is the one part of the plan that shipped backwards.**
+Phase 3 landed first, not "afterward": with `git-anchor` still calling `gix_anchor::Store` up to the moment Phase 3 removed that call, deleting `Store` first (as this paragraph assumes) would have broken the build for the commit in between.
+See Phase 2's shipped note.
+
 `crates/git-anchor/Cargo.toml` gains a `gix-store` dependency; `crates/gix-anchor/Cargo.toml` still names neither `gix-store` nor `gix-refstore` (Phase 2's definition of done, unchanged).
 That rule is about the *library*, not the applications built on it — `git-anchor`'s binary and `gix-comment` both take on `gix-store` directly, which is the whole point of "a binary is an application."
 
 ## Phase 4 — Docs
+
+**Shipped, 2026-07-30.**
+`crates/gix-anchor/README.md`, `crates/gix-comment/README.md`, `crates/git-anchor/README.md`, `crates/git-comment/README.md`, and root `README.md` all updated per the checklist below; `gix-anchor/src/lib.rs`'s doctest needed no change — it already stood a local `Comment`-shaped struct in for a consumer's document rather than importing `gix_anchor::Store`.
+`DEVPLAN-attest.md` already carried the required note from an earlier pass; nothing to add.
 
 - `crates/gix-anchor/README.md` — delete the "Store: notes attached to objects" section; state that persistence is the consumer's, over `gix-store`.
 - `crates/gix-comment/README.md` — drop "This crate adds no persistence of its own"; it now owns its persistence.
@@ -164,6 +191,8 @@ That rule is about the *library*, not the applications built on it — `git-anch
   Its Phase 2 ref-layout question is narrowed by that, and its Phase 3/4 must not plan to reuse `gix_anchor::Store`, which will not exist.
 
 ## Definition of done
+
+**All items hold, verified 2026-07-30.**
 
 - `crates/gix-anchor/Cargo.toml` names neither `gix-store` nor `gix-refstore`.
   `crates/git-anchor/Cargo.toml` naming `gix-store` directly is expected, not a violation — see Phase 3.

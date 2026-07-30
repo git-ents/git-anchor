@@ -3,7 +3,7 @@
 Comments attached to Git objects, built on [`gix-anchor`](../gix-anchor).
 
 A comment is the simplest client of an anchor: a message pinned to whatever a `Binding` names — a commit, a tree, or a durable line range in a blob — that *follows the content* across history exactly as the anchor it rides on does.
-This crate adds no persistence of its own; it is a thin view over `gix-anchor`'s note store.
+This crate owns its own persistence: a `gix-store` kind (`comment`) with `Binding` embedded inline in its document, so the published schema records what `gix-anchor` never sees.
 
 - The comment **message** is the note body.
 - The comment **author** and **timestamp** are the storage commit's — a note is a git commit, so git already records who wrote it and when, and this crate reads those back rather than storing them twice.
@@ -58,10 +58,10 @@ Everything needed to describe what a comment is *about* — `Binding`, `capture`
 
 ## How it works
 
-Every comment is a note under `refs/comments/data/notes/<target>/<id>`, committed with the repository's configured identity — its own namespace, separate from `gix-anchor`'s `refs/anchors`, though both run on the same underlying store.
-Unlike a plain anchor note, a comment's identity is *not* derived from its binding: `add` and `reply` mint a fresh id — the oid of the parentless commit each writes — every time they are called.
+Every comment is an entity of the `comment` kind at `refs/comments/data/comment/<target-hex>/<id-hex>`, committed with the repository's configured identity through this crate's own `gix-store` layout — its own namespace, separate from `gix-anchor`, which stores nothing.
+A comment's identity is genesis-keyed, not derived from its binding: `add` and `reply` mint a fresh id — the oid of the parentless commit each writes — every time they are called.
 That is what makes threads possible: a reply is about the same binding as the comment it replies to, and two people can comment on the same line, so binding identity alone cannot tell separate comments apart.
 `Comment::parent` records which comment (by id) a reply is about, `None` for a thread's root; `thread` walks that link to gather a root and every comment whose own parent chain leads back to it.
-`Comment::state` is likewise a plain opaque string under the hood (`"open"`/`"resolved"`), read back into this crate's own two-value `State`.
-The message is the note body; the author and time are read back from the storage commit; the attachment, when present, is embedded in the note's own tree so it survives gc.
+`Comment::state` is a schema-typed `Option<State>` field of the stored document — an unrecognized variant fails to write, for every writer, not a free string tolerated at read time.
+The message is the document's `body`; the author and time are read back from the storage commit; the attachment, when present, is embedded in the document's own tree so it survives gc.
 `edit`/`resolve`/`reopen` all commit a new version forward onto the same ref (by id, not by binding), so a comment carries its full edit and state history for free.
