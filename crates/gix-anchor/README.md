@@ -34,7 +34,7 @@ Once that commit is garbage-collected, projection degrades to fuzzily matching a
 
 ## Store: notes attached to objects
 
-`Store` persists an anchor together with an arbitrary content *body* under `refs/anchors/<target>/<binding-id>`, with `git notes`-style semantics: one editable note per anchored target, and every re-attach records a new version on the same ref, so history comes for free.
+`Store` persists an anchor together with an arbitrary content *body* under `refs/anchors/data/notes/<target>/<binding-id>`, with `git notes`-style semantics: one editable note per anchored target, and every re-attach records a new version on the same ref, so history comes for free.
 
 ```rust
 use gix_anchor::{capture, Binding, Store};

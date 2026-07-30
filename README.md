@@ -30,11 +30,12 @@ path: src/lib.rs
 lines: 12,16
 ```
 
-A note is a real ref and commit — `refs/anchors/<target>/<id>` — so `git ls-tree`, `git cat-file`, and `git log` inspect it with no application required.
+A note is a real ref and commit — `refs/anchors/data/notes/<target>/<id>` — so `git ls-tree`, `git cat-file`, and `git log` inspect it with no application required.
 Projection reports one of four outcomes as the code moves: *current*, *relocated* (new path/lines), *outdated* (an edit touched the span), or *deleted*.
 Once the anchored commit is gc'd, it falls back to fuzzy-matching a retained context blob.
 
 See [`docs/specification.adoc`](docs/specification.adoc) for the normative requirements, and each crate's `README` for its API and command reference.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) states which capability belongs to which crate — here and in [`git-store`](https://github.com/git-ents/git-store), whose `facet-git-tree`, `gix-refstore`, and `gix-store` do the encoding, ref, and persistence work these crates build on.
 
 ## Code of Conduct
 

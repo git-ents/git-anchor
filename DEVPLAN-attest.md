@@ -4,7 +4,7 @@ A cryptographic claim primitive for git: signed, immutable statements binding a 
 Two crates, this repo's established shape: **`gix-attest`** (library) and **`git-attest`** (CLI, invoked as `git attest`).
 
 This is new design, not a port — unlike `gix-anchor`, there is no `../git-ents` source to extract and no `gix-store` precedent for signing.
-`gix-anchor`'s ref-store pattern (`refs/anchors/<target-oid>/<id>`, notes-style commits) is the closest existing model, and since Phase 0 it is also the shared *engine*: `gix-anchor` now stores through `gix-refstore` rather than its own copy of it.
+`gix-anchor`'s ref-store pattern (notes-style commits under `refs/anchors/data/notes/<target-hex>/<id-hex>`) is the closest existing model, and since Phase 0 it is also the shared *engine*: `gix-anchor` now stores through `gix-store` rather than its own copy of it.
 The shared storage layers live in `../git-store` as two crates:
 
 - **`gix-refstore`** — trait-based CAS ref persistence (`RefStore`/`Committer`, `RefName`/`RefSegment` validation, `GixRefStore` over a real repo, `MemoryRefStore` for tests).
@@ -12,6 +12,14 @@ The shared storage layers live in `../git-store` as two crates:
 
 `gix-attest` should build on these rather than growing a third copy of the ref-CAS machinery (see Phase 2 candidate (c) and Phase 4).
 One known gap to resolve upstream: `gix-store`'s commit writer emits unsigned commits (`extra_headers: Vec::new()` in `store.rs`), and signed commits are this design's canonical claim encoding — see Phase 4.
+
+**Two things changed under this plan after it was written**, both narrowing it:
+
+- Phase 0 shipped, then went further than "`gix-refstore`": [`DEVPLAN-storage.md`](DEVPLAN-storage.md) moved `gix-anchor` onto `gix-store` entirely, and `gix-refstore` grew `RefPath` — a validated multi-segment entity name — so `Kind` addresses entities by *nested* paths, not one flat segment.
+  Phase 2's candidate (c) is affected directly; see the note there.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) settles what shape a claim has: a `Facet` document owned by `gix-attest`, embedding a `Binding` field that names its subject, persisted as its own `gix-store` kind under its own `Layout`.
+  `gix-attest` does not get its own storage engine, and it must not plan on `gix_anchor::Store` — [`DEVPLAN-boundary.md`](DEVPLAN-boundary.md) deletes it.
+  Whether a *claim's* subject is expressible as a `Binding` at all is exactly the range/pair question flagged below, now sharpened: either `Binding` grows the variants, or attest defines its own subject type and `Binding` is not the vocabulary here.
 
 ## Non-negotiable boundaries (do not relitigate)
 
@@ -166,23 +174,17 @@ Acceptance: `docs/specification.adoc` merged with target-kind requirement blocks
 
 ## Phase 2 — Ref layout decision
 
-Equal weight to Phase 1 per the design brief — do not let it default to "copy `gix-anchor`'s `refs/anchors/<target-oid>/<id>`" without evidence, since a claim's target can be a *range* or *pair*, which don't have a single oid to key on the way an anchor's single-object target does.
+Equal weight to Phase 1 per the design brief — do not let it default to "copy `gix-anchor`'s target-oid-keyed nesting" without evidence, since a claim's target can be a *range* or *pair*, which don't have a single oid to key on the way an anchor's single-object target does.
 
 Work:
 
 - Enumerate discovery access patterns the CLI must support: "all claims about this target" (`show`, `verify`), "all claims on a ref" (`log`), "find a claim by id" (`revoke`, `verify <claim-id>`).
   Ref layout must serve all three without a full-repo ref scan for the common case.
-- Candidate layouts to evaluate against those patterns (do not silently pick
-  one): (a) `gix-anchor`-style `refs/attest/<target-key>/<claim-id>` where
-  `<target-key>` is a derived stable hash of the canonical typed target
-  (handles ranges/pairs uniformly, since it hashes the *canonical form*, not
-  a single oid); (b) a flat `refs/attest/<claim-id>` namespace with an
-  index object (commit trailer or tree entry) carrying the target binding,
-  scanned or indexed separately; (c) `gix-store`'s own
-  `refs/store/<kind>/<name>` layout, if claims are stored as a `gix-store`
-  kind (see Phase 4) — its `<name>` is a single `RefSegment`, so target-key
-  grouping would live in an index or in the segment derivation, not in ref
-  nesting.
+- Candidate layouts to evaluate against those patterns (do not silently pick one): (a) `gix-anchor`-style `refs/attest/<target-key>/<claim-id>` where `<target-key>` is a derived stable hash of the canonical typed target (handles ranges/pairs uniformly, since it hashes the *canonical form*, not a single oid); (b) a flat `refs/attest/<claim-id>` namespace with an index object (commit trailer or tree entry) carrying the target binding, scanned or indexed separately; (c) `gix-store`'s own `<data>/<kind>/<entity>` layout, claims stored as a `gix-store` kind (see Phase 4).
+
+  Candidate (c) has since absorbed (a): `Kind`'s entity name is a `RefPath`, a validated multi-segment path, so target-key grouping lives in *ref nesting* exactly as (a) wanted, with no index and no derived-segment trick — `gix-anchor` ships `<target-hex>/<id-hex>` this way today. (c) is now the default and the burden shifts to (b): what does a flat namespace plus an index buy that nesting does not?
+  Note also that the `<kind>` segment is structural, not optional, and that `Layout` splits data and schema prefixes — so the ref form is `refs/attest/data/claims/<target-key>/<claim-id>`, not `refs/attest/<target-key>/<claim-id>`.
+  Do not write the shorter form into the spec; `DEVPLAN-storage.md` shipped with exactly that contradiction between two of its own phases.
 - Whichever layout wins, ref *persistence* is `gix-refstore` (git dep on `../git-store`, same as `facet-git-tree` today): `RefName`/`RefSegment` validation replaces a local `refname.rs`, and `RefStore::apply`'s CAS replaces a hand-rolled lock/retry loop.
   Do **not** depend on `gix-anchor`'s `store.rs` for this — it is anchor-semantic (`Binding`-keyed identities, a `remove()` that deletes refs, directly at odds with boundary 3) and is itself a local duplicate of what `gix-refstore` now provides.
   The layout decision is thereby decoupled from the engine decision: (a)/(b)/(c) differ only in ref naming and discovery, not in who does the CAS.
@@ -340,11 +342,13 @@ Acceptance: DSSE decision recorded in the spec doc with its evidence, even if th
   Either `Target` must grow non-git-object variants (widening the "typed reference into git objects" definition), or revocation/rotation claims bind through a different mechanism than `Target`, in which case the brief's framing of them as "just a claim whose target is X" is imprecise and the CLI/library boundary between "target" and "generic claim subject" needs its own definition.
   This plan does not resolve it — Phase 3 must decide it, and Phase 1's grammar spec should either accommodate it or explicitly scope it out with a named follow-on.
 - **Ref layout vs. range/pair targets.**
-  `gix-anchor`'s `refs/anchors/<target-oid>/<id>` layout (the nearest precedent) assumes a single stable oid per target.
+  `gix-anchor`'s `<target-hex>/<id-hex>` nesting (the nearest precedent) assumes a single stable oid per target.
   Commit-range and hybrid tree-pair targets have no single oid; Phase 2 must pick a derivation (e.g. hash of the canonical target form) rather than reuse the oid-keyed pattern verbatim.
   Flagged here so the temptation to copy `gix-anchor`'s layout unmodified is caught before it's coded, not after.
+  Still open, and now the *only* substantive part of Phase 2 still open, since the nesting mechanism itself is settled.
 - **`gix-anchor` never took the `gix-store` dependency it recommended.**
   `DEVPLAN.md:56` recommends depending on `gix-store` for ref persistence; the shipped `gix-anchor` instead reimplemented the layer locally (`store.rs`/`refname.rs` — per-ref locks, CAS retry, refname validation), taking only `facet-git-tree` from `../git-store`.
   `../git-store` has since factored exactly that layer out as `gix-refstore`, so the code `gix-anchor` duplicated now exists as a reusable crate.
   This plan's earlier draft pointed ref-layout candidate (c) at `gix-anchor`'s store as if it were the shared engine — it is not; the shared engine is `gix-refstore`/`gix-store`, and this plan now targets those directly.
   **Resolved, not merely flagged:** Phase 0 migrates `gix-anchor` onto `gix-refstore` before any `gix-attest` work begins, so this inconsistency is closed by the plan rather than carried by it.
+  Closed in full as of 2026-07-29: `gix-anchor` took the whole `gix-store` dependency, not just the ref layer ([`DEVPLAN-storage.md`](DEVPLAN-storage.md)).

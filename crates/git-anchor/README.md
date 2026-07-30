@@ -80,5 +80,5 @@ At a terminal with no `-m`/`-F` and nothing piped, `add` opens `$EDITOR` for the
 
 ## How it works
 
-`git anchor` is a thin CLI over the [`gix-anchor`](../gix-anchor) library: `add` *captures* an anchor (blob + optional line range + commit) and stores it with the body under `refs/anchors/<target>/<binding-id>`; `show <id>@<rev>` re-derives where the anchored span sits on another commit, reporting *current*, *relocated*, *outdated*, or *deleted*; `show <id> --worktree` re-derives the same against the on-disk working tree instead of a commit.
+`git anchor` is a thin CLI over the [`gix-anchor`](../gix-anchor) library: `add` *captures* an anchor (blob + optional line range + commit) and stores it with the body under `refs/anchors/data/notes/<target>/<binding-id>`; `show <id>@<rev>` re-derives where the anchored span sits on another commit, reporting *current*, *relocated*, *outdated*, or *deleted*; `show <id> --worktree` re-derives the same against the on-disk working tree instead of a commit.
 The note embeds the anchor's tree by object id, so the anchored content stays reachable — no gitlinks, no copies.

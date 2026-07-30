@@ -119,7 +119,7 @@ At a terminal with no `-m`/`-F` and nothing piped, `add`/`reply` open `$EDITOR` 
 
 ## How it works
 
-`git comment` is a thin CLI over the [`gix-comment`](../gix-comment) library, which itself is a thin, opinionated view over [`gix-anchor`](../gix-anchor)'s note store: `add` *captures* an anchor (blob + optional line range + commit) or names a commit directly, and stores the message with it under `refs/comments/<target>/<id>` — its own namespace, distinct from `git-anchor`'s `refs/anchors`, though both run on the same underlying store.
+`git comment` is a thin CLI over the [`gix-comment`](../gix-comment) library, which itself is a thin, opinionated view over [`gix-anchor`](../gix-anchor)'s note store: `add` *captures* an anchor (blob + optional line range + commit) or names a commit directly, and stores the message with it under `refs/comments/data/notes/<target>/<id>` — its own namespace, distinct from `git-anchor`'s `refs/anchors`, though both run on the same underlying store.
 Unlike a plain anchor note, a comment's `<id>` is never derived from its binding: every `add` or `reply` mints a fresh identity, so a reply and the comment it replies to — both about the same binding — never collide onto one ref, and two people can comment on the same line independently.
 `reply <id>` records `<id>` as the new comment's parent and inherits its binding automatically; `show <id> --thread` walks that link back to the root and prints the whole thread.
 `resolve`/`reopen` commit a new version forward with only the lifecycle state changed, message and attachment untouched — the same version-forward mechanism `edit` uses for content.

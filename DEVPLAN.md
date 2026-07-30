@@ -58,7 +58,9 @@ Recommend depending on it — the user said to *use* git-store, and it keeps ret
 
 **What actually shipped, and the correction:** this recommendation was not followed — `store.rs`/`refname.rs` reimplement per-ref locking, CAS retry, and refname validation locally, taking only `facet-git-tree` from git-store.
 `../git-store` has since factored exactly that layer out as `gix-refstore`, and `DEVPLAN-attest.md` Phase 0 migrated this crate onto it (done 2026-07-29), so the family has one ref-CAS engine rather than two.
-Treat that phase, not this line, as the record of what shipped.
+[`DEVPLAN-storage.md`](DEVPLAN-storage.md) then migrated the whole entity engine — schema publication, commit-forward, history, CAS retry — onto `gix-store`, leaving `store.rs` a thin adapter (done 2026-07-29).
+[`DEVPLAN-boundary.md`](DEVPLAN-boundary.md) removes even that: persistence becomes the consumer's, and `gix-anchor` keeps no storage dependency at all.
+Treat those plans, not this line, as the record of what shipped.
 
 ## Phase 4 — `crates/git-anchor` (CLI)
 
@@ -95,6 +97,7 @@ Integration tests with `test-support` + `tempfile` fixtures per subcommand.
 1. `facet-git-tree` dependency source (published vs. git dep on git-store).
    Resolved: git dep on git-store.
 2. Depend on `gix-store` for ref persistence vs. local minimal ref layer.
-   Resolved late: shipped as a local layer, then migrated onto `gix-refstore` — see Phase 3's correction above.
+   Resolved late: shipped as a local layer, then migrated onto `gix-refstore`, then onto `gix-store` in full — see Phase 3's correction above.
 3. Ref namespace layout for stored anchors (`refs/anchors/...`).
-   Resolved: `refs/anchors/<target-hex>/<id-hex>`, prefix-configurable via `Store::with_prefix`.
+   Resolved: `refs/anchors/data/notes/<target-hex>/<id-hex>` with the kind's schema at `refs/anchors/schema/notes`, both derived from one prefix that `Store::with_prefix` supplies.
+   The `<data>/<kind>/<entity>` shape is structural to `gix_store::Layout`, not a choice.

@@ -1,5 +1,12 @@
 # gix-anchor storage — full `git-store` adoption
 
+**Status: done (2026-07-29).**
+Phases 0–4 all shipped; each phase below carries a *Shipped* note where the outcome differs from the plan, and the open decisions at the bottom are resolved.
+
+This plan removed the storage *engine* from `gix-anchor`.
+It did not remove the storage *concern*: `store.rs` still owns a document that belongs to `gix-comment`.
+[`DEVPLAN-boundary.md`](DEVPLAN-boundary.md) finishes the job, under the layering rule stated in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 `gix-anchor/src/store.rs` still hand-rolls the entity engine: `Note` tree building (`facet_git_tree::serialize_into`/`deserialize` called directly), commit writing (`write_commit`), ref-history walking (`ref_history`), and two identity schemes (binding-keyed `attach`, genesis-keyed `create`/`update`) — all wired directly to `gix-refstore`'s `RefStore`/`Committer`.
 That's a storage *engine*, not domain logic, and `../git-store` already has one: `gix-store`'s `Store<R, O>`/`Kind<E, R, O>`.
 
@@ -43,6 +50,15 @@ Given we own both repos and have no callers to keep working, the right move is t
 
 Both land in `git-store` as ordinary breaking changes (version bump per that repo's own conventions), fixed up in the same change everywhere they're used (currently: `gix-store`'s own test suite only).
 
+**Shipped** in `../git-store`, as `RefPath` in `gix-refstore` rather than an `EntityName` in `gix-store` — a validated non-empty segment sequence belongs with the other validated name types, not beside the entity model that consumes it.
+Four further gaps surfaced while writing Phase 2 and were fixed upstream rather than worked around, each because the design here required it:
+
+- `Put::anonymous_under(&RefPath)` — a genesis note needs its target group, not a bare name (`a80662f`).
+- `Entry<V>` with `Kind::get_entry`/`get_entry_at` — `StoredNote` needs the commit oid and summary without decoding a commit itself (`2488dee`).
+- `Kind::update` and `Kind::try_update` — read-modify-write under CAS retry, the second with a fallible rebuild so a caller can *refuse* (`57a8bfd`, `2ed1489`).
+  `gix-anchor`'s `update` needs the refusal: without it, a concurrent delete would force it to fabricate a note and resurrect it.
+- `Kind::list_under(&RefPath)` — without it, listing one target means enumerating every entity and filtering in memory, which makes target-first grouping pointless (`9309baa`).
+
 ## Phase 1 — Design the entity mapping
 
 - One global `Kind<Typed<Note>, R, O>`, name `"notes"` (or similar — bikeshed
@@ -60,19 +76,22 @@ Both land in `git-store` as ordinary breaking changes (version bump per that rep
 - Entity name: the two-segment `EntityName` from Phase 0 item 1, built from
   `hex_segment(target)` + `hex_segment(id)` — same derivation
   `NoteRef::to_ref_name` uses today.
-- `Layout` customization (`gix_store::Layout { data, schema }`): point
-  `data` at `refs/anchors` (kept because it is the right, self-descriptive
-  name for this tool's namespace, not for compatibility) and `schema` at a
-  separate prefix, e.g. `refs/anchors-schema`, so a `refs/anchors` walk
-  never needs to filter out the one schema ref.
-- Method mapping:
-  - `attach`/`attach_with_attachment` → `kind.write(&note).message(summary)
-    .at(&name)` (deterministic name from `binding.serialize_into`'s oid,
-    same as today).
-  - `create` → `kind.write(&note).message(message).anonymous()` (genesis
-    identity, full-oid per Phase 0 item 2).
-  - `update` → `kind.write(&note).message(message).at(&name)`, `name`
-    recovered from the note's existing ref.
+- `Layout` customization (`gix_store::Layout { data, schema }`): point `data` at `refs/anchors` (kept because it is the right, self-descriptive name for this tool's namespace, not for compatibility) and `schema` at a separate prefix, e.g. `refs/anchors-schema`, so a `refs/anchors` walk never needs to filter out the one schema ref.
+
+  **Shipped** as two children of one caller-supplied `RefPrefix` instead: `<prefix>/data/notes/<target-hex>/<id-hex>` and `<prefix>/schema/notes`.
+  This plan contradicted itself — the bullet above says `data` is `refs/anchors`, while Phase 3 asserts a note ref of `refs/anchors/<target-hex>/<id-hex>` with no room for the kind segment that `Layout` puts there structurally.
+  The kind segment is not optional: `gix_store` builds every entity ref as `<data>/<kind>/<entity>`, so removing it means fighting the substrate, which is the opposite of this plan's point.
+  Deriving both prefixes from one root also keeps `with_prefix` working for `gix-comment`'s `refs/comments` and makes a kind-vs-schema collision structurally impossible rather than merely unlikely.
+- Method mapping (**shipped** with the three retry-bearing writes on
+  `Kind::update`/`try_update` rather than bare `at`, since each has to carry
+  `created_at` — and `update` also the binding — forward off whatever
+  version it actually commits over):
+  - `attach`/`attach_with_attachment` → `kind.update(&name, rebuild)`
+    (deterministic name from `binding.serialize_into`'s oid, same as today).
+  - `create` → `kind.write(&note).message(message).anonymous_under(&group)`
+    (genesis identity, full-oid per Phase 0 item 2, grouped by target).
+  - `update` → `kind.try_update(&name, rebuild)`, `name` recovered from the
+    note's existing ref, `rebuild` refusing when the entry is gone.
   - `list`/`get`/`get_at`/`history`/`remove` → `Kind::list`/`get`/`get_at`/
     `history`/`remove` directly.
   - Looking a note up by identity oid (not by entity name) stays
@@ -100,13 +119,11 @@ Both land in `git-store` as ordinary breaking changes (version bump per that rep
   directly — decide once `Kind<'s, ...>`'s borrow of `&'s Store<R, O>` is
   worked out against `gix-anchor`'s existing "construct once, call many
   times" `RepoStore::open` usage).
-- `Error`: reuse the existing transparent-boxing pattern (`Error::git`,
-  already `Box<dyn std::error::Error + Send + Sync>`) for
-  `gix_store::Error` — no new variant needed unless a specific
-  `gix_store::Error` case (e.g. `NameTaken`, now unreachable in practice)
-  deserves its own arm for a better message.
-  `Error::GenesisExists` stays, now backed by `gix_store::Error::NameTaken`
-  on a genuine full-oid collision.
+- `Error`: reuse the existing transparent-boxing pattern (`Error::git`, already `Box<dyn std::error::Error + Send + Sync>`) for `gix_store::Error` — no new variant needed unless a specific `gix_store::Error` case (e.g. `NameTaken`, now unreachable in practice) deserves its own arm for a better message.
+
+  **Shipped** as a blanket `From<gix_store::Error> for Error` over that same boxing.
+  `Error::GenesisExists` was *deleted*, not kept: full-oid `anonymous_under` makes a genesis collision an object-database collision, so a variant claiming it is a reachable outcome is a lie in the public API.
+  The test that asserted it went with it, along with the `Collide` fault injection that existed only to trigger it.
 - Update `crates/git-anchor` and `crates/gix-comment` in the same phase for whatever, if anything, changed in `Store`'s public shape.
   Expected to be nothing beyond internals, but this phase is where it gets fixed if something does.
 
@@ -114,12 +131,15 @@ Both land in `git-store` as ordinary breaking changes (version bump per that rep
 
 - `FlakyRefStore`, `SplitIdentity`, `MemoryRefStore`-backed fixtures in `store.rs`'s test module are unaffected in kind: `gix_store::Store<R, O>` is generic over the same `R: RefStore + Committer, O: Find + Write` bounds `gix-anchor`'s local `Store` used, so every existing CAS-retry test (`attach_with_attachment_retries_and_forwards_the_winners_created_at`, `update_retries_and_carries_the_winners_binding_and_created_at_forward`, `remove_retries_and_deletes_the_winning_tip`, both `create_*` race tests) keeps exercising real retry logic — just inside `gix-store` now.
   Port them, don't rewrite their intent.
+
+  **Shipped**, with two fixtures adjusted because the *storage format* changed under them, not their intent: `write_note_commit` (which scripts the race winner) used the deleted local `write_commit` and would now write a tree `gix-store` cannot read, since an entity tree is a `{value/, schema/}` split — it mints a real schema-bound commit at a scratch entity name instead, deliberately not a `<hex>/<hex>` pair so `list`/`find` never see it.
+  `prefix_boundary_is_a_whole_segment_not_a_string_prefix` asserted an exact ref count of 2, which became 3 once the schema ref existed; the count was incidental scaffolding, so it now asserts the foreign ref exists and that `list` does not see it, which is what the test was named for.
 - Add a test asserting exactly one schema ref exists after anchoring notes
   against multiple distinct targets (regression guard for the single-global-
   kind decision).
-- Add a test asserting both identity schemes' ref segments are full-oid
-  (`refs/anchors/<target-hex>/<id-hex>`, 40 hex chars each) — regression
-  guard against Phase 0 item 2 regressing to a truncated name.
+- Add a test asserting both identity schemes' ref segments are full-oid (`refs/anchors/<target-hex>/<id-hex>`, 40 hex chars each) — regression guard against Phase 0 item 2 regressing to a truncated name.
+
+  **Shipped** as `both_identity_schemes_name_entities_by_full_oids`, which asserts the *pair of 40-hex segments* without hard-coding the prefix — the ref-path form in this bullet is the contradiction Phase 1 records, and the 40-hex property is what the test was actually for.
 - Port `gix-store`'s own `Kind`/`Put` tests for the new multi-segment
   `EntityName` and full-oid `anonymous()` behavior into `gix-store`'s test
   suite as part of Phase 0, not deferred to `gix-anchor`.
@@ -128,6 +148,9 @@ Both land in `git-store` as ordinary breaking changes (version bump per that rep
   sites needed it.
 
 ## Phase 4 — Cleanup & docs
+
+Also record the boundary question this plan surfaced but did not answer: `store.rs` is now free of engine code, yet still owns a `Note` document whose `parent`/`state` fields exist only for `gix-comment`.
+[`ARCHITECTURE.md`](ARCHITECTURE.md) states the rule, and [`DEVPLAN-boundary.md`](DEVPLAN-boundary.md) plans the move.
 
 - `DEVPLAN.md`'s Phase 3 correction currently ends at "migrated onto `gix-refstore`."
   Update it to point here: the ref-CAS layer migrated onto `gix-refstore` first, then the whole entity engine (schema, commit-forward, history) migrated onto `gix-store` in this plan.
@@ -138,22 +161,20 @@ Both land in `git-store` as ordinary breaking changes (version bump per that rep
   doc comment (name-drops `gix_anchor::Store`) — check both still read
   accurately after Phase 2.
 
-## Open decisions
+## Open decisions — resolved
 
-1. **`EntityName`'s exact shape** (Phase 0 item 1) — settle when writing
-   the `gix-store` change: a dedicated struct vs. a type alias over
-   `Vec<RefSegment>` vs. accepting `impl IntoIterator<Item = RefSegment>`
-   directly at each call site with no named type at all.
-2. **`Store<R, O>`'s internal shape** (Phase 2) — newtype around a
-   `gix_store::Kind` directly, vs. holding a `gix_store::Store<R, O>` and
-   building a `Kind` per call — depends on how `Kind<'s, ...>`'s lifetime
-   plays against `RepoStore::open`'s "build once, call many times" shape.
-3. **Whether `find_ref`'s linear scan-by-id can be dropped** once both
-   identity schemes name entities by their full oid (Phase 1's last bullet)
-   — likely yes for `create`/`update`/`get`/`remove` (id *is* the entity
-   name, so no scan needed), but `attach`'s binding-keyed scheme still
-   names by the *binding's* oid, not the note's own — confirm this doesn't
-   quietly break `attach`-based lookups by note id before deleting the scan.
+1. **`EntityName`'s exact shape** (Phase 0 item 1).
+   Resolved: `RefPath`, a validated non-empty `RefSegment` sequence, added to `gix-refstore` beside the other name types rather than to `gix-store`.
+   `From<RefSegment>` covers the single-segment case; `segments()` returns a slice, so a caller's depth check is a slice pattern rather than a guard.
+2. **`Store<R, O>`'s internal shape** (Phase 2).
+   Resolved: holds a `gix_store::Store<R, O>` and builds a `Kind` per call.
+   `Kind<'s, ...>` borrows the store, so storing one in a field would make `Store` self-referential; building it per call is free.
+3. **Whether `find_ref`'s linear scan-by-id can be dropped.**
+   Resolved: no, and the reason is structural rather than incidental.
+   An entity is named `<target>/<id>` under both schemes, and an identity oid does not carry its target, so a lookup by id alone must search.
+   The scan reads *ref names only*, never objects.
+   Reordering to `<id>/<target>` would make `get` direct but force `list(Some(target))` to read every note's binding — strictly worse, since listing is the common operation.
+   Long term this is an index, and therefore `git-query`'s job; see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Definition of done
 

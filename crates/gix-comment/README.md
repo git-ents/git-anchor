@@ -58,7 +58,7 @@ Everything needed to describe what a comment is *about* — `Binding`, `capture`
 
 ## How it works
 
-Every comment is a note under `refs/comments/<target>/<id>`, committed with the repository's configured identity — its own namespace, separate from `gix-anchor`'s `refs/anchors`, though both run on the same underlying store.
+Every comment is a note under `refs/comments/data/notes/<target>/<id>`, committed with the repository's configured identity — its own namespace, separate from `gix-anchor`'s `refs/anchors`, though both run on the same underlying store.
 Unlike a plain anchor note, a comment's identity is *not* derived from its binding: `add` and `reply` mint a fresh id — the oid of the parentless commit each writes — every time they are called.
 That is what makes threads possible: a reply is about the same binding as the comment it replies to, and two people can comment on the same line, so binding identity alone cannot tell separate comments apart.
 `Comment::parent` records which comment (by id) a reply is about, `None` for a thread's root; `thread` walks that link to gather a root and every comment whose own parent chain leads back to it.
