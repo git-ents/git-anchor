@@ -1,7 +1,7 @@
-//! Integration tests for `anchor.retention`: the serialized anchor embeds
-//! the anchored blob and context blob as ordinary tree entries — reachable
-//! from the storing document's tree, reproducing the original blob's object
-//! id by content addressing, and never via a gitlink.
+//! Integration tests for `anchor.retention`: the serialized anchor's hints
+//! (fingerprints, descriptors) are ordinary tree entries, reachable from the
+//! storing document's tree and never a gitlink — additive, versioned
+//! material, never identity-bearing.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, reason = "integration test")]
 
@@ -43,11 +43,11 @@ fn numbered(range: std::ops::RangeInclusive<u32>) -> String {
     range.map(|n| format!("line {n}\n")).collect()
 }
 
-/// The serialized anchor's `content` and `context` entries are blobs — mode
-/// `100644`, never a gitlink (`160000`) — and `content` is retained as a
-/// storage leaf blob (decoded back byte-for-byte by deserialization).
+/// The serialized anchor's `hints` subtree never holds a gitlink (mode
+/// `160000`) anywhere in it — every fingerprint and descriptor is an
+/// ordinary blob or tree entry.
 #[test]
-fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
+fn hints_never_embed_a_gitlink() {
     let dir = fixture_repo(&numbered(1..=10));
     let repo = gix::open(dir.path()).unwrap();
     let anchor = gix_anchor::capture(
@@ -57,6 +57,7 @@ fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
         Some(LineRange { start: 3, end: 4 }),
     )
     .unwrap();
+    assert!(!anchor.hints.fingerprints.is_empty());
 
     let store = ObjectStore::default();
     let root = serialize_into(&anchor, &store).expect("serialize");
@@ -66,39 +67,29 @@ fn retention_embeds_blobs_by_the_original_object_id_and_never_a_gitlink() {
         .find(|e| e.filename == "hints")
         .expect("hints entry")
         .oid;
-    let entries = store.get_tree(&hints_oid).expect("hints tree");
 
-    for entry in &entries {
-        assert_ne!(
-            entry.mode.kind(),
-            EntryKind::Commit,
-            "a gitlink retains nothing (anchor.retention): {:?}",
-            entry.filename
-        );
+    let mut stack = vec![hints_oid];
+    while let Some(tree) = stack.pop() {
+        for entry in store.get_tree(&tree).expect("tree") {
+            assert_ne!(
+                entry.mode.kind(),
+                EntryKind::Commit,
+                "a gitlink retains nothing (anchor.retention): {:?}",
+                entry.filename
+            );
+            if entry.mode.kind() == EntryKind::Tree {
+                stack.push(entry.oid);
+            }
+        }
     }
-    let content = entries
-        .iter()
-        .find(|e| e.filename == "content")
-        .expect("content entry");
-    assert_eq!(content.mode.kind(), EntryKind::Blob);
-    assert_ne!(
-        content.oid,
-        gix::ObjectId::from(anchor.hints.blob),
-        "serialized leaf encoding stores retained bytes under a storage-leaf oid"
-    );
-    let context = entries
-        .iter()
-        .find(|e| e.filename == "context")
-        .expect("context entry");
-    assert_eq!(context.mode.kind(), EntryKind::Blob);
 }
 
-/// The anchored content stays reachable from the storing document's own
-/// tree: walking the comment's tree (the shape `refs/meta/comments/*`
-/// points at) reaches the anchored blob, so the ref keeps it alive through
+/// The anchor's hints stay reachable from the storing document's own tree:
+/// walking the comment's tree (the shape `refs/meta/comments/*` points at)
+/// reaches every hint object, so the ref keeps them alive through
 /// force-push, branch deletion, and gc with no special-casing.
 #[test]
-fn anchored_content_is_reachable_from_the_storing_documents_tree() {
+fn hints_are_reachable_from_the_storing_documents_tree() {
     let dir = fixture_repo(&numbered(1..=10));
     let repo = gix::open(dir.path()).unwrap();
     let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap();
@@ -112,13 +103,6 @@ fn anchored_content_is_reachable_from_the_storing_documents_tree() {
         .find(|entry| entry.filename == "hints")
         .expect("hints entry")
         .oid;
-    let retained_content = store
-        .get_tree(&hints_tree)
-        .expect("hints tree")
-        .into_iter()
-        .find(|entry| entry.filename == "content")
-        .expect("content entry")
-        .oid;
 
     let comment = Comment {
         body: "anchored".to_owned(),
@@ -126,31 +110,26 @@ fn anchored_content_is_reachable_from_the_storing_documents_tree() {
     };
     let root = serialize_into(&comment, &store).expect("serialize comment");
 
-    // Walk every tree reachable from the comment root; the anchored blob
-    // must be among the reachable objects.
     let mut stack = vec![root];
     let mut found = false;
     while let Some(tree) = stack.pop() {
         for entry in store.get_tree(&tree).expect("tree") {
-            match entry.mode.kind() {
-                EntryKind::Tree => stack.push(entry.oid),
-                _ => {
-                    if entry.oid == retained_content {
-                        found = true;
-                    }
-                }
+            if entry.oid == hints_tree {
+                found = true;
+            }
+            if entry.mode.kind() == EntryKind::Tree {
+                stack.push(entry.oid);
             }
         }
     }
     assert!(
         found,
-        "the retained content blob must be reachable from the comment's own tree"
+        "the hints subtree must be reachable from the comment's own tree"
     );
 }
 
 /// A captured anchor round-trips through its tree unchanged — the struct is
-/// the schema, and the retained bytes survive storage verbatim, non-ASCII
-/// included.
+/// the schema, and non-ASCII content fingerprints identically either way.
 #[test]
 fn anchor_round_trips_through_its_tree() {
     let dir = fixture_repo("line 1\nline 2\n\u{fe}\u{ff} non-ascii bytes\n");

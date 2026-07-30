@@ -155,30 +155,27 @@ fn create_with_identical_coordinates_and_state_prints_the_identical_handle() {
     assert!(!first.is_empty());
 }
 
-/// The bug `create/inject` shipped with and then fixed: a committed capture
-/// and a `--worktree` capture of the *same span* differ only in retained
-/// hint bytes, so they must print different handles (hints differ) but
-/// resolve to the identical anchor id (identity is the same coordinates).
+/// Identity is now byte-precise (ARCHITECTURE.md's "Identity rule"): a
+/// committed capture and a `--worktree` capture of *byte-identical* content
+/// at the same commit and path resolve to the identical anchor id — and,
+/// since a fingerprint hint is a pure function of those same bytes, the
+/// identical handle too. Capturing after an edit that changes the anchored
+/// span's own bytes is a *different* anchor, by design: only edits strictly
+/// outside the span leave the span's byte offsets (and so its identity)
+/// unchanged.
 #[test]
-fn committed_and_worktree_captures_of_the_same_span_share_an_anchor_id_but_not_a_handle() {
+fn committed_and_worktree_captures_of_the_same_bytes_share_a_handle() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
 
-    std::fs::write(
-        path.join("file.txt"),
-        numbered(1..=10).replace("line 5", "line five"),
-    )
-    .unwrap();
-
     let committed = create(path, &["--path", "file.txt", "-L", "5,6"]);
     let worktree = create(path, &["--path", "file.txt", "-L", "5,6", "--worktree"]);
-    assert_ne!(committed, worktree, "differing hints: different handles");
     assert_eq!(
-        anchor_id(path, &committed),
-        anchor_id(path, &worktree),
-        "identical identity: the same anchor id"
+        committed, worktree,
+        "byte-identical capture, same commit and path: identical handle"
     );
+    assert_eq!(anchor_id(path, &committed), anchor_id(path, &worktree));
 
     let (_, err, ok) = run(
         path,
@@ -355,9 +352,9 @@ fn inject_json_supplies_the_document_and_still_gets_the_binding_injected() {
     assert!(out.contains("\"Commit\""), "show --json: {out}");
 }
 
-/// `inject` groups by the anchor id, not by any hint: a committed capture
-/// and a `--worktree` capture of the same span differ only in retained
-/// hints, so they must land in the same group.
+/// `inject` groups by the anchor id: a committed capture and a
+/// `--worktree` capture of byte-identical content at the same commit and
+/// path land in the same group.
 #[test]
 fn committed_and_worktree_captures_inject_into_the_same_group() {
     let dir = tempfile::tempdir().unwrap();
@@ -381,11 +378,6 @@ fn committed_and_worktree_captures_inject_into_the_same_group() {
     assert!(ok, "inject failed: {err}");
     let committed_name = out.trim().to_owned();
 
-    std::fs::write(
-        path.join("file.txt"),
-        numbered(1..=10).replace("line 5", "line five"),
-    )
-    .unwrap();
     let worktree_handle = create(path, &["--path", "file.txt", "-L", "5,6", "--worktree"]);
     let (out, err, ok) = run(
         path,
@@ -503,10 +495,15 @@ fn bare_invocation_lists_kinds_and_marks_anchorable_ones() {
     assert!(!out.contains("plain  (anchorable)"), "kinds output: {out}");
 }
 
-// ── projection: @<rev> and --worktree, over a reflected binding ─────────
+// ── show: an entity exactly as stored, no resolution ─────────────────────
+//
+// `show` no longer resolves a position binding onto another revision or the
+// working tree (ARCHITECTURE.md: "`project` is library-internal... no
+// user-facing command resolves through it"); that is `git-query`'s
+// `bind/5`, not this CLI's job.
 
 #[test]
-fn show_at_rev_projects_a_position_binding() {
+fn show_prints_an_injected_entity_as_stored() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
@@ -517,61 +514,17 @@ fn show_at_rev_projects_a_position_binding() {
     assert!(ok, "inject failed: {err}");
     let name = out.trim().to_owned();
 
-    let (out, err, ok) = run(path, &["show", "doc", &format!("{name}@HEAD")]);
-    assert!(ok, "show @rev failed: {err}");
-    assert!(out.contains("current"), "show @rev output: {out}");
+    let (out, err, ok) = run(path, &["show", "doc", &name, "--json"]);
+    assert!(ok, "show failed: {err}");
+    assert!(out.contains("note"), "show output: {out}");
 }
 
 #[test]
-fn show_at_rev_rejects_a_commit_binding() {
+fn worktree_capture_injects_and_shows_as_stored() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let handle = create(path, &[]);
-
-    let (out, _, ok) = run(
-        path,
-        &["inject", "doc", "whole commit", "--anchor", &handle],
-    );
-    assert!(ok);
-    let name = out.trim().to_owned();
-
-    let (_, err, ok) = run(path, &["show", "doc", &format!("{name}@HEAD")]);
-    assert!(!ok);
-    assert!(err.contains("position"), "stderr: {err}");
-}
-
-#[test]
-fn show_rejects_reflog_syntax() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-    publish::<Doc>(path, "refs/anchors", "doc");
-    let handle = create(path, &[]);
-
-    let (out, _, ok) = run(path, &["inject", "doc", "note", "--anchor", &handle]);
-    assert!(ok);
-    let name = out.trim().to_owned();
-
-    let (_, err, ok) = run(path, &["show", "doc", &format!("{name}@{{yesterday}}")]);
-    assert!(!ok, "reflog syntax should be rejected");
-    assert!(err.contains("reflog"), "stderr: {err}");
-}
-
-#[test]
-fn worktree_inject_and_show_project_uncommitted_content() {
-    let dir = tempfile::tempdir().unwrap();
-    setup(dir.path());
-    let path = dir.path();
-    publish::<Doc>(path, "refs/anchors", "doc");
-
-    // Dirty the working tree without committing.
-    std::fs::write(
-        path.join("file.txt"),
-        numbered(1..=10).replace("line 5", "line five"),
-    )
-    .unwrap();
 
     let handle = create(path, &["--path", "file.txt", "-L", "5,6", "--worktree"]);
     let (out, err, ok) = run(
@@ -584,11 +537,6 @@ fn worktree_inject_and_show_project_uncommitted_content() {
     let (out, err, ok) = run(path, &["show", "doc", &name, "--json"]);
     assert!(ok, "show failed: {err}");
     assert!(out.contains("worktree note"), "show output: {out}");
-
-    let (out, err, ok) = run(path, &["show", "doc", &name, "--worktree"]);
-    assert!(ok, "show --worktree failed: {err}");
-    assert!(out.contains("current"), "show --worktree output: {out}");
-    assert!(out.contains("line five"), "show --worktree output: {out}");
 }
 
 // ── the ref namespace is a plain argument, not hard-coded ────────────────

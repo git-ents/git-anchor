@@ -3,15 +3,23 @@
 //! Spec coverage: `anchor.definition`, `anchor.identity`, `anchor.immutable`,
 //! `anchor.retention`.
 
+use std::collections::BTreeMap;
+
 use facet::Facet;
-use gix::bstr::ByteSlice as _;
+use facet_git_tree::normal_form::NormalForm;
 
 use crate::error::{Error, Result};
-use crate::handle::AnchorId;
+use crate::fingerprint::{Fingerprint, capture_fingerprint};
+use crate::handle::{AnchorId, IdentityNormalForm};
 use crate::oid::Oid;
-use crate::util::{lines_of, read_blob, resolve_commit};
+use crate::util::{byte_span_of, read_blob, resolve_commit};
 
-/// A 1-based inclusive range of lines within an anchored file.
+/// A 1-based inclusive range of lines, as a user supplies one to
+/// [`crate::capture`]/[`crate::capture_worktree`] (`git anchor create -L`).
+///
+/// Capture-time canonicalization is legal (ARCHITECTURE.md, "Identity
+/// rule"): this exists only to be converted to a [`Span`] during capture. It
+/// never appears in [`AnchorIdentity`] and is not itself durable.
 ///
 /// # Examples
 ///
@@ -21,7 +29,7 @@ use crate::util::{lines_of, read_blob, resolve_commit};
 /// let range = LineRange { start: 3, end: 4 };
 /// assert_eq!(range.end - range.start + 1, 2, "two lines, inclusive");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRange {
     /// The first line of the range, 1-based.
     pub start: u64,
@@ -29,91 +37,127 @@ pub struct LineRange {
     pub end: u64,
 }
 
-/// How many lines of surrounding source [`capture`] retains on each side of
-/// an anchored range as [`AnchorHints::context`].
-pub(crate) const CONTEXT_MARGIN: u64 = 3;
-
-/// An anchor's non-derivable coordinates (`anchor.definition`): the commit it
-/// was captured against, its path, and its line range. Nothing else belongs
-/// here — [`Anchor::id`] is the content hash of this alone (`anchor.identity`).
-#[derive(Debug, Clone, PartialEq, Eq, Facet)]
-pub struct AnchorIdentity {
-    /// The commit this anchor was captured against, recorded on a
-    /// best-effort basis: nothing keeps it reachable, so it may already be
-    /// gone by the time the anchor is read back.
-    /// [`crate::project_exact`] needs it to still exist;
-    /// [`crate::project_from_context`] does not.
-    pub genesis: Oid,
-    /// The repository-relative path of the anchored file at `genesis`.
-    pub path: String,
-    /// The anchored lines, or `None` for a whole-file anchor.
-    pub lines: Option<LineRange>,
-}
-
-/// Retained material (`anchor.retention`): derivable from [`AnchorIdentity`],
-/// never read by [`Anchor::id`].
-#[derive(Debug, Clone, PartialEq, Eq, Facet)]
-pub struct AnchorHints {
-    /// The anchored blob's object id — derivable by reading `identity`'s
-    /// tree, retained so projection need not re-derive it on every call.
-    pub blob: Oid,
-    /// The anchored blob's full bytes, embedded verbatim and serialized as a
-    /// storage leaf blob.
-    pub content: Vec<u8>,
-    /// A window of up to [`CONTEXT_MARGIN`] lines on either side of the
-    /// anchored range (or the whole file, for a whole-file anchor), for
-    /// [`crate::project_from_context`] to fuzzy-match once `identity.genesis`
-    /// is gone.
-    pub context: Vec<u8>,
-}
-
-/// A durable pointer into source: authoritative at creation
-/// (`anchor.immutable`) and never mutated — every function taking one
-/// borrows it immutably, and [`crate::project`] only ever produces a new
-/// [`crate::Projection`], never a changed `Anchor`.
-///
-/// `identity` and `hints` are sibling subtrees: `identity` is
-/// [`AnchorIdentity`], `hints` is [`AnchorHints`]. Serializing an `Anchor`
-/// writes both as ordinary tree entries — `hints`' blobs never a gitlink,
-/// which would keep nothing reachable (`anchor.retention`).
+/// A half-open byte range over a blob's bytes exactly as git stores them
+/// (post-clean-filter) — the one canonical form [`AnchorIdentity`] carries
+/// (ARCHITECTURE.md, "git-anchor"). `start == end` names an empty span at
+/// that offset; `start == 0 && end == len` names the whole blob.
 ///
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::{Anchor, LineRange};
-/// use facet_git_tree::{EntryKind, ObjectStore, serialize};
+/// use gix_anchor::Span;
 ///
-/// # fn write_numbered_file(dir: &std::path::Path) {
-/// #     std::fs::write(dir.join("file.txt"), (1..=10).map(|n| format!("line {n}\n")).collect::<String>()).unwrap();
-/// # }
-/// # fn commit(dir: &std::path::Path) {
-/// #     std::process::Command::new("git").arg("-C").arg(dir).args(["add", "-A"]).status().unwrap();
-/// #     std::process::Command::new("git").arg("-C").arg(dir)
-/// #         .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "one"])
-/// #         .status().unwrap();
-/// # }
-/// let dir = tempfile::tempdir().expect("tempdir");
-/// std::process::Command::new("git").arg("init").arg("-q").arg(dir.path()).status().unwrap();
-/// write_numbered_file(dir.path());
-/// commit(dir.path());
-///
-/// let repo = gix::open(dir.path()).expect("open");
-/// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", Some(LineRange { start: 3, end: 4 }))
-///     .expect("capture");
-///
-/// // The embedded content is retained as a storage leaf blob under `hints`
-/// // (still a normal blob entry, never a gitlink).
-/// let (root, store) = serialize(&anchor).expect("serialize");
-/// let (kind, oid) = {
-///     let hints = store.get_tree(&root).expect("tree");
-///     let hints_entry = hints.iter().find(|e| e.filename == "hints").expect("hints entry");
-///     let hints_entries = store.get_tree(&hints_entry.oid).expect("hints tree");
-///     let entry = hints_entries.iter().find(|e| e.filename == "content").expect("content entry");
-///     (entry.mode.kind(), entry.oid)
-/// };
-/// assert_eq!(kind, EntryKind::Blob, "never a gitlink");
-/// assert_ne!(oid, gix::ObjectId::from(anchor.hints.blob));
+/// let span = Span { start: 10, end: 20 };
+/// assert_eq!(span.end - span.start, 10);
 /// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+pub struct Span {
+    /// The span's first byte offset, inclusive.
+    pub start: u64,
+    /// The span's last byte offset, exclusive.
+    pub end: u64,
+}
+
+impl Span {
+    /// The whole of a blob `len` bytes long.
+    fn whole(len: usize) -> Self {
+        Self {
+            start: 0,
+            end: u64::try_from(len).unwrap_or(u64::MAX),
+        }
+    }
+
+    /// `bytes[self]`, or `None` when `self` does not fit `bytes`.
+    #[must_use]
+    pub fn slice<'b>(&self, bytes: &'b [u8]) -> Option<&'b [u8]> {
+        let start = usize::try_from(self.start).ok()?;
+        let end = usize::try_from(self.end).ok()?;
+        bytes.get(start..end)
+    }
+}
+
+/// An anchor's non-derivable coordinates (`anchor.definition`): the commit it
+/// was captured against, its path, and its byte span. Nothing else belongs
+/// here — [`Anchor::id`] is the content hash of this alone (`anchor.identity`),
+/// routed through the identity normal form (`crate::handle::hash_identity`)
+/// rather than the general codec.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+#[facet(facet_git_tree::identity_key)]
+pub struct AnchorIdentity {
+    /// The commit this anchor was captured against, recorded on a
+    /// best-effort basis: nothing keeps it reachable, so it may already be
+    /// gone by the time the anchor is read back.
+    pub genesis_rev: Oid,
+    /// The repository-relative path of the anchored file at `genesis_rev`.
+    pub path: String,
+    /// The anchored byte span over the blob's stored bytes, always
+    /// canonical (ARCHITECTURE.md, "Identity rule").
+    pub span: Span,
+}
+
+impl IdentityNormalForm for AnchorIdentity {
+    fn to_normal_form(&self) -> NormalForm {
+        NormalForm::Struct(BTreeMap::from([
+            (
+                "genesis_rev".to_owned(),
+                NormalForm::Hash(gix::ObjectId::from(self.genesis_rev)),
+            ),
+            ("path".to_owned(), NormalForm::Str(self.path.clone())),
+            (
+                "span".to_owned(),
+                NormalForm::List(vec![
+                    NormalForm::U64(self.span.start),
+                    NormalForm::U64(self.span.end),
+                ]),
+            ),
+        ]))
+    }
+}
+
+/// Retained material (`anchor.retention`): derivable from [`AnchorIdentity`]
+/// given the repository, never read by [`Anchor::id`]. Additive and
+/// versioned — an algorithm or grammar upgrade changes what lands here, never
+/// an anchor id.
+#[derive(Debug, Clone, PartialEq, Eq, Facet, Default)]
+pub struct AnchorHints {
+    /// Fuzzy content signatures over the anchored span, for the
+    /// [`crate::oracle::fingerprint`] oracle to match against once exact
+    /// history tracing fails. [`crate::capture`] and
+    /// [`crate::capture_worktree`] each emit exactly one,
+    /// [`crate::fingerprint::MINHASH_SHINGLE_V1`]; an absent or stale
+    /// fingerprint is recomputed on demand from `identity`, never trusted
+    /// blindly.
+    pub fingerprints: Vec<Fingerprint>,
+    /// Grammar-aware structural descriptors (CST node kind, name path) a
+    /// grammar-aware producer fills in. This crate has no grammar dependency,
+    /// so [`crate::capture`] and [`crate::capture_worktree`] always emit an
+    /// empty list here rather than invent one.
+    pub descriptors: Vec<Descriptor>,
+}
+
+/// A grammar-aware structural descriptor: which grammar (by id and version),
+/// which kind of node, at which name path — a function of blob and grammar,
+/// filled in by a grammar-aware producer this crate does not implement.
+#[derive(Debug, Clone, PartialEq, Eq, Facet)]
+pub struct Descriptor {
+    /// The grammar's identifier (e.g. a tree-sitter language name).
+    pub grammar_id: String,
+    /// The grammar's version.
+    pub grammar_version: String,
+    /// The CST node kind the anchored span sits at.
+    pub node_kind: String,
+    /// The path of names (module, item, field, ...) leading to that node.
+    pub name_path: Vec<String>,
+}
+
+/// A durable pointer into source: authoritative at creation
+/// (`anchor.immutable`) and never mutated — every function taking one
+/// borrows it immutably, and every oracle in [`crate::oracle`] only ever
+/// produces a [`crate::oracle::Candidate`], never a changed `Anchor`.
+///
+/// `identity` and `hints` are sibling subtrees: `identity` is
+/// [`AnchorIdentity`], `hints` is [`AnchorHints`]. Serializing an `Anchor`
+/// writes both as ordinary tree entries.
 #[derive(Debug, Clone, PartialEq, Eq, Facet)]
 pub struct Anchor {
     /// The non-derivable coordinates. [`Anchor::id`] hashes this alone.
@@ -124,35 +168,22 @@ pub struct Anchor {
 
 impl Anchor {
     /// The anchor id (`anchor.identity`): the content hash of
-    /// [`Anchor::identity`] alone, independent of [`Anchor::hints`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # let dir = tempfile::tempdir().expect("tempdir");
-    /// # std::process::Command::new("git").arg("init").arg("-q").arg(dir.path()).status().unwrap();
-    /// # std::fs::write(dir.path().join("file.txt"), "a\nb\nc\n").unwrap();
-    /// # std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "-A"]).status().unwrap();
-    /// # std::process::Command::new("git").arg("-C").arg(dir.path())
-    /// #     .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "one"])
-    /// #     .status().unwrap();
-    /// let repo = gix::open(dir.path()).expect("open");
-    /// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).expect("capture");
-    /// assert!(anchor.id().is_ok());
-    /// ```
+    /// [`Anchor::identity`] alone, through the identity normal form,
+    /// independent of [`Anchor::hints`].
     ///
     /// # Errors
     ///
-    /// [`Error::Serialize`] when the underlying `facet-git-tree` write fails.
+    /// [`Error::NormalForm`] when the underlying `facet-git-tree` normal-form
+    /// write fails.
     pub fn id(&self) -> Result<AnchorId> {
         crate::handle::hash_identity(&self.identity)
     }
 }
 
 /// Build the [`Anchor`] for `path` (and optionally `lines`) as it exists at
-/// `revision` in `repo`, embedding the file's full content and a
-/// `CONTEXT_MARGIN`-line (three-line) window around `lines`
-/// (`anchor.retention`).
+/// `revision` in `repo`, recording its byte span and a fresh capture-time
+/// fingerprint (`anchor.retention`).
+///
 /// Fails when the path is not a file at that commit or the range does not
 /// fit it (`anchor.definition`).
 ///
@@ -169,7 +200,6 @@ impl Anchor {
 /// let repo = gix::open(dir.path()).expect("open");
 /// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).expect("capture");
 /// assert_eq!(anchor.identity.path, "file.txt");
-/// assert_eq!(gix_anchor::snippet(&anchor).unwrap(), "line 1\nline 2\nline 3\n");
 /// ```
 pub fn capture(
     repo: &gix::Repository,
@@ -192,66 +222,36 @@ pub fn capture(
         })?;
     let blob = entry.object_id();
     let content = read_blob(repo, blob)?;
-    if let Some(range) = lines {
-        lines_of(&content, path, range)?;
-    }
-    let context = capture_context(&content, lines);
+    let span = span_for(&content, path, lines)?;
 
     Ok(Anchor {
         identity: AnchorIdentity {
-            genesis: commit_id.into(),
+            genesis_rev: commit_id.into(),
             path: path.to_owned(),
-            lines,
+            span,
         },
-        hints: AnchorHints {
-            blob: blob.into(),
-            content,
-            context,
-        },
+        hints: hints_for(&content, span),
     })
 }
 
 /// Build the [`Anchor`] for `path` (and optionally `lines`) as it currently
 /// sits in `repo`'s working tree (`anchor.working-tree`): the on-disk bytes
-/// are written to the object database as a blob and embedded exactly as
-/// [`capture`] embeds a committed blob (`anchor.retention`), so an anchor to
-/// uncommitted content survives that content being committed, amended, or
-/// discarded. `identity.genesis` records `HEAD`'s commit, the same
-/// best-effort, never-load-bearing coordinate a [`capture`]d anchor's is.
+/// are written to the object database as a blob — the stored bytes a
+/// [`Span`] is canonical over — so an anchor to uncommitted content survives
+/// that content being committed, amended, or discarded. `identity.genesis_rev`
+/// records `HEAD`'s commit, the same best-effort, never-load-bearing
+/// coordinate a [`capture`]d anchor's is.
 ///
 /// Fails with [`Error::NoWorkingTree`] on a bare repository, with
 /// [`Error::MissingPath`] when `path` is not a readable file on disk, and
 /// with [`Error::LinesOutOfRange`] when the range does not fit the on-disk
-/// content (`anchor.definition`'s validation, applied to the bytes actually
-/// captured).
-///
-/// # Examples
-///
-/// ```
-/// # let dir = tempfile::tempdir().expect("tempdir");
-/// # std::process::Command::new("git").arg("init").arg("-q").arg(dir.path()).status().unwrap();
-/// # std::fs::write(dir.path().join("file.txt"), "committed\n").unwrap();
-/// # std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "-A"]).status().unwrap();
-/// # std::process::Command::new("git").arg("-C").arg(dir.path())
-/// #     .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "one"])
-/// #     .status().unwrap();
-/// // Dirty the file after the commit: the anchor captures the *on-disk*
-/// // bytes, not what HEAD holds.
-/// std::fs::write(dir.path().join("file.txt"), "edited, not yet committed\n").unwrap();
-/// let repo = gix::open(dir.path()).expect("open");
-/// let anchor = gix_anchor::capture_worktree(&repo, "file.txt", None).expect("capture");
-/// assert_eq!(gix_anchor::snippet(&anchor).unwrap(), "edited, not yet committed\n");
-/// assert_eq!(gix::ObjectId::from(anchor.identity.genesis), repo.head_id().expect("head").detach());
-/// ```
+/// content.
 pub fn capture_worktree(
     repo: &gix::Repository,
     path: &str,
     lines: Option<LineRange>,
 ) -> Result<Anchor> {
     let workdir = repo.workdir().ok_or(Error::NoWorkingTree)?;
-    // HEAD is recorded as plain data (`anchor.working-tree`); a repository
-    // with no commit yet has no best-effort commit to record, and the
-    // Resolve error names exactly that.
     let commit_id = resolve_commit(repo, "HEAD")?.id().detach();
     let file = workdir.join(path);
     let missing = || Error::MissingPath {
@@ -262,81 +262,41 @@ pub fn capture_worktree(
         return Err(missing());
     }
     let content = std::fs::read(&file).map_err(|_source| missing())?;
-    if let Some(range) = lines {
-        lines_of(&content, path, range)?;
-    }
+    let span = span_for(&content, path, lines)?;
     // Written to the odb now (`anchor.working-tree`), so the blob exists
-    // under its own id from the moment of capture — embedding it in the
-    // anchor's stored tree later reproduces this same id by content
-    // addressing (`anchor.retention`).
-    let blob = repo
-        .write_blob(content.as_slice())
-        .map_err(|error| Error::Object(error.to_string()))?
-        .detach();
-    let context = capture_context(&content, lines);
+    // under its own id from the moment of capture, over the same bytes the
+    // span is canonical over.
+    repo.write_blob(content.as_slice())
+        .map_err(|error| Error::Object(error.to_string()))?;
 
     Ok(Anchor {
         identity: AnchorIdentity {
-            genesis: commit_id.into(),
+            genesis_rev: commit_id.into(),
             path: path.to_owned(),
-            lines,
+            span,
         },
-        hints: AnchorHints {
-            blob: blob.into(),
-            content,
-            context,
-        },
+        hints: hints_for(&content, span),
     })
 }
 
-/// The exact text of `anchor`'s lines — the whole file for a whole-file
-/// anchor — derived at read time from [`AnchorHints::content`], so it can
-/// never disagree with what was captured and is never itself stored
-/// (`anchor.immutable`).
-///
-/// # Examples
-///
-/// ```
-/// # let dir = tempfile::tempdir().expect("tempdir");
-/// # std::process::Command::new("git").arg("init").arg("-q").arg(dir.path()).status().unwrap();
-/// # std::fs::write(dir.path().join("file.txt"), "a\nb\nc\n").unwrap();
-/// # std::process::Command::new("git").arg("-C").arg(dir.path()).args(["add", "-A"]).status().unwrap();
-/// # std::process::Command::new("git").arg("-C").arg(dir.path())
-/// #     .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "one"])
-/// #     .status().unwrap();
-/// let repo = gix::open(dir.path()).expect("open");
-/// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", Some(gix_anchor::LineRange { start: 2, end: 2 }))
-///     .expect("capture");
-/// assert_eq!(gix_anchor::snippet(&anchor).unwrap(), "b\n");
-/// ```
-pub fn snippet(anchor: &Anchor) -> Result<String> {
-    match anchor.identity.lines {
-        None => Ok(String::from_utf8_lossy(&anchor.hints.content).into_owned()),
-        Some(range) => lines_of(&anchor.hints.content, &anchor.identity.path, range),
+/// Canonicalize `lines` against `content` into a [`Span`] — capture-time
+/// canonicalization, legal per ARCHITECTURE.md's identity rule — or the
+/// whole-blob span when `lines` is `None`.
+fn span_for(content: &[u8], path: &str, lines: Option<LineRange>) -> Result<Span> {
+    match lines {
+        Some(range) => byte_span_of(content, path, range),
+        None => Ok(Span::whole(content.len())),
     }
 }
 
-/// The anchored range (or, for a whole-file anchor, the whole file) plus up
-/// to [`CONTEXT_MARGIN`] lines on either side within `content` — a small,
-/// independently-retainable snapshot of the anchor's surroundings for
-/// [`crate::project_from_context`] to fuzzy-match once the anchor's commit
-/// is gone.
-fn capture_context(content: &[u8], lines: Option<LineRange>) -> Vec<u8> {
-    let Some(range) = lines else {
-        return content.to_vec();
-    };
-    let all: Vec<&[u8]> = content.lines_with_terminator().collect();
-    let len = u64::try_from(all.len()).unwrap_or(u64::MAX);
-    let start0 = range.start.saturating_sub(1);
-    let margin_before = CONTEXT_MARGIN.min(start0);
-    let ctx_start = start0.saturating_sub(margin_before);
-    let margin_after = CONTEXT_MARGIN.min(len.saturating_sub(range.end));
-    let ctx_end = range.end.saturating_add(margin_after).min(len);
-    let (Ok(ctx_start), Ok(ctx_end)) = (usize::try_from(ctx_start), usize::try_from(ctx_end))
-    else {
-        return Vec::new();
-    };
-    all.get(ctx_start..ctx_end).unwrap_or_default().concat()
+/// The capture-time [`AnchorHints`]: one [`Fingerprint`] over the anchored
+/// span's bytes, no descriptors (this crate has no grammar dependency).
+fn hints_for(content: &[u8], span: Span) -> AnchorHints {
+    let bytes = span.slice(content).unwrap_or(content);
+    AnchorHints {
+        fingerprints: vec![capture_fingerprint(bytes)],
+        descriptors: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -359,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_records_the_commit_and_blob_and_snippet_derives_the_text() {
+    fn capture_records_the_commit_and_a_byte_span() {
         let dir = repo();
         std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
         commit_all(dir.path(), "one");
@@ -367,13 +327,15 @@ mod tests {
 
         let anchor = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
         assert_eq!(
-            ObjectId::from(anchor.identity.genesis).to_string(),
+            ObjectId::from(anchor.identity.genesis_rev).to_string(),
             head(dir.path())
         );
         assert_eq!(anchor.identity.path, "file.txt");
-        assert_eq!(anchor.identity.lines, range(3, 4));
-        assert_eq!(anchor.hints.content, numbered(1..=10).into_bytes());
-        assert_eq!(snippet(&anchor).unwrap(), "line 3\nline 4\n");
+        let content = numbered(1..=10).into_bytes();
+        assert_eq!(
+            anchor.identity.span.slice(&content).unwrap(),
+            b"line 3\nline 4\n"
+        );
     }
 
     #[rstest]
@@ -396,45 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn context_captures_a_margin_around_the_anchored_range() {
-        let dir = repo();
-        std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
-        commit_all(dir.path(), "one");
-        let git_repo = gix::open(dir.path()).unwrap();
-        let anchor = capture(&git_repo, "HEAD", "file.txt", range(5, 6)).unwrap();
-
-        // 3 lines of margin on each side of a 2-line range: lines 2..=9.
-        let expected: String = (2..=9).map(|n| format!("line {n}\n")).collect();
-        assert_eq!(anchor.hints.context, expected.into_bytes());
-    }
-
-    #[test]
-    fn context_clamps_to_the_file_when_the_margin_would_overrun_it() {
-        let dir = repo();
-        std::fs::write(dir.path().join("file.txt"), numbered(1..=4)).unwrap();
-        commit_all(dir.path(), "one");
-        let git_repo = gix::open(dir.path()).unwrap();
-        let anchor = capture(&git_repo, "HEAD", "file.txt", range(1, 2)).unwrap();
-
-        assert_eq!(anchor.hints.context, numbered(1..=4).into_bytes());
-    }
-
-    #[test]
-    fn context_of_a_whole_file_anchor_is_the_whole_file() {
-        let dir = repo();
-        std::fs::write(dir.path().join("file.txt"), numbered(1..=5)).unwrap();
-        commit_all(dir.path(), "one");
-        let git_repo = gix::open(dir.path()).unwrap();
-        let anchor = capture(&git_repo, "HEAD", "file.txt", None).unwrap();
-
-        assert_eq!(anchor.hints.context, numbered(1..=5).into_bytes());
-    }
-
-    /// `anchor.working-tree`: capture reads the *on-disk* bytes (not
-    /// `HEAD`'s blob), writes them to the odb as a blob, and records
-    /// `HEAD`'s commit as the plain-data `identity.genesis` coordinate.
-    #[test]
-    fn capture_worktree_records_dirty_bytes_head_and_an_odb_blob() {
+    fn capture_worktree_records_dirty_bytes_and_head() {
         let dir = repo();
         std::fs::write(dir.path().join("file.txt"), numbered(1..=10)).unwrap();
         commit_all(dir.path(), "one");
@@ -444,35 +368,12 @@ mod tests {
 
         let anchor = capture_worktree(&git_repo, "file.txt", range(5, 6)).unwrap();
         assert_eq!(
-            ObjectId::from(anchor.identity.genesis).to_string(),
+            ObjectId::from(anchor.identity.genesis_rev).to_string(),
             head(dir.path())
         );
-        assert_eq!(anchor.hints.content, dirty.clone().into_bytes());
-        assert_eq!(snippet(&anchor).unwrap(), "line five\nline 6\n");
-        // The blob exists in the odb from the moment of capture, under the
-        // on-disk bytes' own id — not HEAD's version of the file.
-        assert!(git_repo.has_object(ObjectId::from(anchor.hints.blob)));
-        let committed = capture(&git_repo, "HEAD", "file.txt", None).unwrap();
-        assert_ne!(anchor.hints.blob, committed.hints.blob);
-    }
-
-    /// The anchor survives the uncommitted content being committed
-    /// (`anchor.working-tree`): after `git commit`, the same blob sits at
-    /// the anchored path, so projection reports it current.
-    #[test]
-    fn capture_worktree_anchor_survives_the_content_being_committed() {
-        let dir = repo();
-        std::fs::write(dir.path().join("file.txt"), numbered(1..=3)).unwrap();
-        commit_all(dir.path(), "one");
-        std::fs::write(dir.path().join("file.txt"), numbered(1..=4)).unwrap();
-        let git_repo = gix::open(dir.path()).unwrap();
-        let anchor = capture_worktree(&git_repo, "file.txt", range(4, 4)).unwrap();
-
-        commit_all(dir.path(), "two");
-        let git_repo = gix::open(dir.path()).unwrap();
         assert_eq!(
-            crate::project(&git_repo, &anchor, "HEAD").unwrap(),
-            crate::Projection::Current
+            anchor.identity.span.slice(dirty.as_bytes()).unwrap(),
+            b"line five\nline 6\n"
         );
     }
 
@@ -496,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn snippet_derives_text_from_content_and_never_stores_it_separately() {
+    fn anchor_reflects_identity_then_hints() {
         let Type::User(UserType::Struct(struct_ty)) = Anchor::SHAPE.ty else {
             panic!("Anchor must reflect as a struct");
         };
@@ -507,7 +408,7 @@ mod tests {
             panic!("AnchorIdentity must reflect as a struct");
         };
         let identity_names: Vec<_> = identity_ty.fields.iter().map(|f| f.name).collect();
-        assert_eq!(identity_names, vec!["genesis", "path", "lines"]);
+        assert_eq!(identity_names, vec!["genesis_rev", "path", "span"]);
 
         let Type::User(UserType::Struct(hints_ty)) = AnchorHints::SHAPE.ty else {
             panic!("AnchorHints must reflect as a struct");
@@ -515,12 +416,14 @@ mod tests {
         let hints_names: Vec<_> = hints_ty.fields.iter().map(|f| f.name).collect();
         assert_eq!(
             hints_names,
-            vec!["blob", "content", "context"],
-            "snippet must derive from `hints.content`, never cache it in a separate field"
+            vec!["fingerprints", "descriptors"],
+            "identity must never hold a fingerprint or a descriptor"
         );
     }
 
-    /// `anchor.identity`: the id is a pure function of `identity` alone.
+    /// `anchor.identity`: the id is a pure function of `identity` alone, and
+    /// a hint change — including a fingerprint algorithm upgrade — never
+    /// changes it (ARCHITECTURE.md, "Identity rule").
     #[test]
     fn id_is_invariant_under_a_hints_change_and_varies_with_any_identity_coordinate() {
         let dir = repo();
@@ -530,7 +433,16 @@ mod tests {
         let anchor = capture(&git_repo, "HEAD", "file.txt", range(3, 4)).unwrap();
 
         let mut same_identity = anchor.clone();
-        same_identity.hints.context = b"unrelated\n".to_vec();
+        same_identity
+            .hints
+            .fingerprints
+            .push(capture_fingerprint(b"unrelated"));
+        same_identity.hints.descriptors.push(Descriptor {
+            grammar_id: "rust".to_owned(),
+            grammar_version: "1".to_owned(),
+            node_kind: "fn_item".to_owned(),
+            name_path: vec!["main".to_owned()],
+        });
         assert_eq!(
             anchor.id().unwrap(),
             same_identity.id().unwrap(),
@@ -541,15 +453,57 @@ mod tests {
         different_path.identity.path = "other.txt".to_owned();
         assert_ne!(anchor.id().unwrap(), different_path.id().unwrap());
 
-        let mut different_lines = anchor.clone();
-        different_lines.identity.lines = range(5, 6);
-        assert_ne!(anchor.id().unwrap(), different_lines.id().unwrap());
+        let mut different_span = anchor.clone();
+        different_span.identity.span = Span { start: 0, end: 1 };
+        assert_ne!(anchor.id().unwrap(), different_span.id().unwrap());
 
         let mut different_genesis = anchor.clone();
-        different_genesis.identity.genesis =
+        different_genesis.identity.genesis_rev =
             gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567")
                 .unwrap()
                 .into();
         assert_ne!(anchor.id().unwrap(), different_genesis.id().unwrap());
+    }
+
+    /// A line-range input canonicalizes to the same byte span regardless of
+    /// a clean filter: `capture` always reads odb (post-clean-filter) bytes,
+    /// so it is naturally clean-filter-stable — this pins the byte offsets a
+    /// CRLF-normalizing filter would otherwise disagree about.
+    #[test]
+    fn line_range_canonicalizes_to_the_same_span_across_a_clean_filter() {
+        let dir = repo();
+        std::fs::write(dir.path().join(".gitattributes"), "file.txt text eol=lf\n").unwrap();
+        std::fs::write(dir.path().join("file.txt"), "a\r\nb\r\nc\r\n").unwrap();
+        commit_all(dir.path(), "one");
+        let git_repo = gix::open(dir.path()).unwrap();
+
+        let anchor = capture(&git_repo, "HEAD", "file.txt", range(2, 2)).unwrap();
+        // The stored (clean-filtered) blob has LF line endings; the span
+        // must be computed over those bytes, not the CRLF the filter
+        // definition requested on checkout.
+        assert_eq!(anchor.identity.span, Span { start: 2, end: 4 });
+    }
+
+    /// Byte-stability: a hard-coded anchor id for a fixed identity, so a
+    /// future encoding change breaks loudly here rather than silently
+    /// re-homing every anchor id in existence.
+    #[test]
+    fn anchor_id_is_byte_stable() {
+        let identity = AnchorIdentity {
+            genesis_rev: gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111")
+                .unwrap()
+                .into(),
+            path: "src/refdb.rs".to_owned(),
+            span: Span {
+                start: 4180,
+                end: 4630,
+            },
+        };
+        let id = crate::handle::hash_identity(&identity).unwrap();
+        assert_eq!(
+            id.to_string(),
+            "8e50840508db65f7296d8cbedaee54a042efe948",
+            "hard-coded against the frozen identity normal form mapping"
+        );
     }
 }

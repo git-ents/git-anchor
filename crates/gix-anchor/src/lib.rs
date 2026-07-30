@@ -1,45 +1,43 @@
-//! Anchor storage and projection: durable pointers into source — a blob,
-//! an optional line range, and a specific commit — and their read-time
-//! projection onto any other commit.
+//! Anchor identity and hints (ARCHITECTURE.md, "git-anchor"): a `Binding`'s
+//! non-derivable coordinates — a genesis commit, a path, a byte span — and
+//! the additive, versioned, never-identity-bearing hints riding alongside
+//! them, plus the three oracles that map an anchor onto another revision.
 //!
-//! This crate owns the `Anchor` abstraction described in the crate
-//! specification. Anchors resolve and project independently of any
-//! consumer: a downstream consumer's `Comment` is merely the first client
-//! (its `anchor: RawTree` field embeds the tree an [`Anchor`] serializes
-//! to), and reviews, TODO trackers, and blame overlays can reuse the same
-//! mechanism. (A consuming crate depends on this crate, not the other way
-//! around, so this crate's own examples and tests stand a `Comment`-shaped
-//! struct in for it rather than importing it.)
+//! This crate owns the `Anchor` abstraction. Anchors resolve independently of
+//! any consumer: a downstream consumer's `Comment` is merely the first
+//! client (its `anchor: RawTree` field embeds the tree an [`Anchor`]
+//! serializes to), and reviews, TODO trackers, and blame overlays can reuse
+//! the same mechanism. (A consuming crate depends on this crate, not the
+//! other way around, so this crate's own examples and tests stand a
+//! `Comment`-shaped struct in for it rather than importing it.)
 //!
 //! # Spec coverage
 //!
 //! This crate implements, from the crate specification:
 //!
 //! - `anchor.definition` — [`Anchor`] and [`capture`]'s validation.
-//! - `anchor.immutable` — no mutating API exists; [`snippet`] derives the
-//!   anchored text at read time; the commit id is plain data.
-//! - `anchor.retention` — [`AnchorHints::content`] and [`AnchorHints::context`]
-//!   are ordinary blob tree entries in the anchor's own serialized tree,
-//!   never a gitlink.
-//! - `anchor.projection` — [`project`] / [`project_exact`] and the
-//!   four-outcome [`Projection`] taxonomy.
-//! - `anchor.fuzzy-fallback` — [`project_from_context`], which [`project`]
-//!   degrades to once the anchored commit has been garbage collected.
-//! - `anchor.working-tree` — [`capture_worktree`] (the on-disk bytes as a
-//!   capture source, `HEAD` recorded as the best-effort commit field) and
-//!   [`project_worktree`] (the on-disk bytes, or a caller-supplied buffer
-//!   standing in for them, as a projection target).
+//! - `anchor.identity` — [`AnchorIdentity`] and [`Anchor::id`], hashed
+//!   through the identity normal form, independent of [`AnchorHints`].
+//! - `anchor.immutable` — no mutating API exists; the commit id is plain
+//!   data.
+//! - `anchor.retention` — [`AnchorHints::fingerprints`] and
+//!   [`AnchorHints::descriptors`], additive and never identity-bearing.
+//! - `anchor.oracles` — [`diff_trace`], [`fingerprint_oracle`], and
+//!   [`op_log`], each reporting `(oracle, confidence)` candidates and
+//!   applying no threshold.
+//! - `anchor.working-tree` — [`capture_worktree`], the on-disk bytes as a
+//!   capture source, `HEAD` recorded as the best-effort commit field.
 //! - `anchor.tree-pair-diff` — [`diff_trees`], a structural, pruning tree
 //!   diff over any [`gix_object::Find`] source, with no `gix::Repository`
 //!   required.
 //!
 //! # Examples
 //!
-//! Capture an anchor, store it inside a `Comment`, read it back, and
-//! project it onto a later commit:
+//! Capture an anchor, store it inside a `Comment`, read it back, and map it
+//! onto a later commit with [`diff_trace`]:
 //!
 //! ```
-//! use gix_anchor::{Anchor, LineRange, Projection};
+//! use gix_anchor::{Anchor, LineRange};
 //! use facet_git_tree::RawTree;
 //!
 //! // Stands in for a downstream consumer's `Comment` (this crate cannot
@@ -61,11 +59,10 @@
 //! # git(dir.path(), &["commit", "-q", "-m", "one"]);
 //! let repo = gix::open(dir.path()).expect("open");
 //!
-//! // Capture against HEAD: commit, path, blob, and range are validated
-//! // and recorded; content and context are embedded (`anchor.retention`).
+//! // Capture against HEAD: the line range is a capture-time input,
+//! // canonicalized to a byte span before it ever reaches `identity`.
 //! let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", Some(LineRange { start: 3, end: 4 }))
 //!     .expect("capture");
-//! assert_eq!(gix_anchor::snippet(&anchor).expect("snippet"), "line 3\nline 4\n");
 //!
 //! // The anchor serializes into the same store the comment does; the
 //! // comment embeds it by tree id (`RawTree`), so the anchored content is
@@ -84,18 +81,15 @@
 //!     facet_git_tree::deserialize(&back.anchor.oid(), &store).expect("deserialize anchor");
 //! assert_eq!(anchor_back, anchor);
 //!
-//! // Edit above the range and project: the anchor relocates, unmutated.
+//! // Edit above the range and trace: the anchor relocates, unmutated.
 //! # std::fs::write(dir.path().join("file.txt"), format!("added\n{}", (1..=10).map(|n| format!("line {n}\n")).collect::<String>())).unwrap();
 //! # git(dir.path(), &["add", "-A"]);
 //! # git(dir.path(), &["commit", "-q", "-m", "two"]);
 //! let repo = gix::open(dir.path()).expect("reopen");
-//! assert_eq!(
-//!     gix_anchor::project(&repo, &anchor_back, "HEAD").expect("project"),
-//!     Projection::Relocated {
-//!         path: "file.txt".to_owned(),
-//!         lines: Some(LineRange { start: 4, end: 5 }),
-//!     }
-//! );
+//! let candidates = gix_anchor::diff_trace(&repo, &anchor_back, "HEAD").expect("diff_trace");
+//! assert_eq!(candidates.len(), 1);
+//! assert_eq!(candidates[0].path, "file.txt");
+//! assert_eq!(candidates[0].confidence, 1.0);
 //! ```
 #![forbid(unsafe_code)]
 
@@ -103,15 +97,17 @@ mod anchor;
 mod binding;
 mod diff;
 mod error;
+mod fingerprint;
 #[cfg(test)]
 mod fixture;
 mod handle;
 mod oid;
-mod projection;
+mod oracle;
+mod pin;
 mod util;
 
 pub use anchor::{
-    Anchor, AnchorHints, AnchorIdentity, LineRange, capture, capture_worktree, snippet,
+    Anchor, AnchorHints, AnchorIdentity, Descriptor, LineRange, Span, capture, capture_worktree,
 };
 pub use binding::{
     Binding, CommitIdentity, DeltaHints, DeltaIdentity, EvalState, HybridIdentity, NoHints,
@@ -119,9 +115,11 @@ pub use binding::{
 };
 pub use diff::{TreeChange, diff_trees};
 pub use error::{Error, Result};
+pub use fingerprint::{Fingerprint, MINHASH_SHINGLE_V1, Param, minhash_shingle};
 pub use handle::{AnchorId, CaptureHandle};
 pub use oid::Oid;
-pub use projection::{
-    Content, PROJECTION_HEURISTIC_VERSION, Position, Projection, project, project_candidates,
-    project_exact, project_from_context, project_many, project_worktree,
+pub use oracle::{
+    Candidate, DIFF_TRACE_ALGORITHM, DIFF_TRACE_ORACLE_VERSION, OpLogSource, Oracle, diff_trace,
+    fingerprint as fingerprint_oracle, minhash_similarity, op_log,
 };
+pub use pin::{RebindPin, register_rebind_pin_schema};

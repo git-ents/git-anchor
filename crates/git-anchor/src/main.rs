@@ -7,10 +7,13 @@
 //! name): that field is always filled from a previously [`create`](Command::Create)d
 //! binding, never from user text. `list`/`show`/`remove` work the same way
 //! for any kind, published schema or not, read back as [`facet_value::Value`]
-//! rather than a compiled Rust type. `show`'s `@<rev>`/`--worktree`
-//! projection re-derives where a position binding sits elsewhere, exactly as
-//! it always did — it operates on the [`Binding`] extracted from the read
-//! entity, not on any document-specific field.
+//! rather than a compiled Rust type.
+//!
+//! `show` prints an entity as stored and nothing more: the pin-free oracle
+//! chain (`diff_trace`/`fingerprint_oracle`/`op_log`) is library-internal
+//! (ARCHITECTURE.md: "`project` is library-internal... no user-facing
+//! command resolves through it") — resolving a binding onto another
+//! revision is `git-query`'s `bind/5`, not this CLI's job.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -19,12 +22,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use facet_git_tree::{
     Node, ObjectStore, Schema, StructField, deserialize_value_with_schema, schema_of,
-    serialize_value_with_schema,
 };
 use facet_value::{VObject, Value};
 use gix_anchor::{
-    Anchor, Binding, CaptureHandle, CommitIdentity, LineRange, NoHints, Projection, capture,
-    capture_worktree, project, project_worktree, snippet,
+    Binding, CaptureHandle, CommitIdentity, LineRange, NoHints, capture, capture_worktree,
 };
 use gix_store::{
     DocumentBuilder, Layout, RefPath, RefPrefix, RefSegment, RepoStore, entity_name_under,
@@ -62,8 +63,7 @@ enum Command {
     #[command(visible_alias = "ls")]
     List(ListArgs),
     /// Show one entity of `<kind>` by its full entity name (as `list` or
-    /// `inject` printed it). `@<rev>` projects a position binding onto
-    /// another revision; `--worktree` projects onto the working tree.
+    /// `inject` printed it), exactly as stored.
     Show(ShowArgs),
     /// Remove one or more entities of `<kind>`, by full entity name. Every
     /// name is checked to exist before any entity is removed.
@@ -142,16 +142,12 @@ struct ListArgs {
 struct ShowArgs {
     /// The kind to read from.
     kind: RefSegment,
-    /// An entity's full name, optionally with an `@<rev>` suffix.
-    spec: String,
+    /// An entity's full name.
+    name: String,
     /// Emit the entity as a single JSON value instead of the human-readable
     /// form.
     #[arg(long)]
     json: bool,
-    /// Project onto the working tree instead of showing the entity as
-    /// stored. Conflicts with an `@<rev>` suffix on `spec`.
-    #[arg(long)]
-    worktree: bool,
 }
 
 /// Arguments for `remove`.
@@ -186,7 +182,7 @@ fn main() -> Result<()> {
         Some(Command::Id(args)) => cmd_id(&repo, args)?,
         Some(Command::Inject(args)) => cmd_inject(&repo, &store, args)?,
         Some(Command::List(args)) => cmd_list(&store, &args.kind, args.json)?,
-        Some(Command::Show(args)) => cmd_show(&repo, &store, args)?,
+        Some(Command::Show(args)) => cmd_show(&store, args)?,
         Some(Command::Remove(args)) => cmd_remove(&store, &args.kind, &args.names)?,
     }
     Ok(())
@@ -321,55 +317,18 @@ fn cmd_list(store: &RepoStore<'_>, kind: &RefSegment, json: bool) -> Result<()> 
     Ok(())
 }
 
-/// `show`: an entity as stored, or — with an `@<rev>` suffix or
-/// `--worktree` — its position binding projected elsewhere.
-fn cmd_show(repo: &gix::Repository, store: &RepoStore<'_>, args: ShowArgs) -> Result<()> {
-    let ShowArgs {
-        kind,
-        spec,
-        json,
-        worktree,
-    } = args;
-    let (name_str, rev) = split_show_spec(&spec)?;
-    if worktree && rev.is_some() {
-        bail!("--worktree conflicts with an @<rev> suffix on the entity name");
-    }
-    let name =
-        RefPath::new(name_str).with_context(|| format!("invalid entity name {name_str:?}"))?;
+/// `show`: an entity exactly as stored. Resolving a position binding onto
+/// another revision is `git-query`'s `bind/5`, not this CLI's job
+/// (ARCHITECTURE.md: "`project` is library-internal").
+fn cmd_show(store: &RepoStore<'_>, args: ShowArgs) -> Result<()> {
+    let ShowArgs { kind, name, json } = args;
+    let name = RefPath::new(&name).with_context(|| format!("invalid entity name {name:?}"))?;
 
     let dynamic = store.dynamic(kind.clone());
     let value = dynamic
         .get(&name)?
         .ok_or_else(|| anyhow!("no entity {name} in kind {kind}"))?;
-
-    if rev.is_none() && !worktree {
-        print_value(&name, &value, json)?;
-        return Ok(());
-    }
-
-    let schema = dynamic
-        .schema()
-        .get()?
-        .ok_or_else(|| anyhow!("no schema published for kind {kind}"))?;
-    let field = binding_field(&schema)?;
-    let binding_value = value
-        .as_object()
-        .and_then(|obj| obj.get(&field))
-        .cloned()
-        .ok_or_else(|| anyhow!("entity {name} has no {field:?} field"))?;
-    let binding = value_to_binding(&binding_value)?;
-    let Binding::Position(anchor) = binding else {
-        bail!(
-            "entity {name} is a {} binding; @<rev>/--worktree projection applies only to \
-             position bindings",
-            binding_kind(&binding)
-        );
-    };
-    let projection = match rev {
-        Some(rev) => project(repo, &anchor, rev)?,
-        None => project_worktree(repo, &anchor, None)?,
-    };
-    print_projection(&name, &projection, &anchor, json)
+    print_value(&name, &value, json)
 }
 
 /// `remove`: delete every named entity, having confirmed all of them exist
@@ -463,17 +422,6 @@ fn binding_to_value(binding: &Binding) -> Result<Value> {
     deserialize_value_with_schema(&root, &schema, &store).context("re-reading the binding")
 }
 
-/// The inverse of [`binding_to_value`]: a [`Value`] already known to conform
-/// to `Binding`'s schema, decoded back into a real [`Binding`] by the same
-/// round trip in reverse.
-fn value_to_binding(value: &Value) -> Result<Binding> {
-    let store = ObjectStore::default();
-    let schema = schema_of::<Binding>().context("Binding's own schema")?;
-    let root = serialize_value_with_schema(value, &schema, &store)
-        .context("re-encoding the binding field")?;
-    facet_git_tree::deserialize(&root, &store).context("decoding the binding field")
-}
-
 /// `schema`'s root, resolved to its struct fields.
 fn struct_fields(schema: &Schema) -> Result<&BTreeMap<String, StructField>> {
     match resolve(schema, &schema.root) {
@@ -559,80 +507,6 @@ fn print_value(name: &RefPath, value: &Value, json: bool) -> Result<()> {
         println!("{}", facet_json::to_string_pretty(value)?);
     }
     Ok(())
-}
-
-/// A projection outcome, human- or machine-readable — shared by `show
-/// <kind> <name>@<rev>` and `show <kind> <name> --worktree`.
-fn print_projection(
-    name: &RefPath,
-    projection: &Projection,
-    anchor: &Anchor,
-    json: bool,
-) -> Result<()> {
-    if json {
-        let mut obj = VObject::new();
-        obj.insert("name", name.to_string());
-        obj.insert("outcome", projection.label().to_string());
-        match projection {
-            Projection::Relocated { path, lines } => {
-                obj.insert("path", path.as_str());
-                if let Some(lines) = lines {
-                    let mut l = VObject::new();
-                    l.insert("start", i64::try_from(lines.start).unwrap_or(i64::MAX));
-                    l.insert("end", i64::try_from(lines.end).unwrap_or(i64::MAX));
-                    obj.insert("lines", l);
-                }
-            }
-            Projection::Outdated { path } => {
-                obj.insert("path", path.as_str());
-            }
-            Projection::Current | Projection::Deleted => {}
-        }
-        println!("{}", facet_json::to_string(&Value::from(obj))?);
-        return Ok(());
-    }
-    println!("{}", projection.label());
-    match projection {
-        Projection::Relocated { path, lines } => {
-            println!("path: {path}");
-            if let Some(lines) = lines {
-                println!("lines: {},{}", lines.start, lines.end);
-            }
-        }
-        Projection::Current => println!("{}", snippet(anchor)?),
-        Projection::Outdated { .. } | Projection::Deleted => {}
-    }
-    Ok(())
-}
-
-/// This binding's porcelain kind name.
-fn binding_kind(binding: &Binding) -> &'static str {
-    match binding {
-        Binding::Commit { .. } => "commit",
-        Binding::Tree { .. } => "tree",
-        Binding::Delta { .. } => "delta",
-        Binding::Position(_) => "position",
-        Binding::Hybrid { .. } => "hybrid",
-    }
-}
-
-/// Split a `show` argument into an entity-name prefix and an optional
-/// `@<rev>` suffix. `@{…}` (git's reflog/date syntax) is rejected outright.
-fn split_show_spec(spec: &str) -> Result<(&str, Option<&str>)> {
-    let Some((name, rev)) = spec.split_once('@') else {
-        return Ok((spec, None));
-    };
-    if rev.starts_with('{') {
-        bail!(
-            "{spec:?} looks like git's `@{{...}}` reflog syntax, which an entity name does \
-             not support; use `<name>@<rev>` to project onto a revision"
-        );
-    }
-    if rev.is_empty() {
-        Ok((name, None))
-    } else {
-        Ok((name, Some(rev)))
-    }
 }
 
 /// `-L`'s value, once parsed: the range, and an optional path carried in a

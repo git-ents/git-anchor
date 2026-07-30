@@ -3,19 +3,18 @@
 //! expected.
 //!
 //! A [`CaptureHandle`] is the oid of a whole serialized binding tree —
-//! identity and hints together. It is transient: its only job is carrying a
-//! capture from `create` to `inject`, because hints must be locatable
-//! before `inject` embeds them inline in a document. An [`AnchorId`] is the
-//! oid of the `identity` subtree alone (`anchor.identity`) — invariant
-//! under every hint change, and the value a pin cites.
-//!
-//! Because `identity` is a named entry inside the binding tree,
-//! [`CaptureHandle::anchor_id`] reads it directly off a handle, with no
-//! extra bookkeeping and without decoding `hints` at all.
+//! identity and hints together, through the general `facet-git-tree` codec
+//! (so the binding can be embedded and read back as an ordinary document
+//! field). It is transient: its only job is carrying a capture from
+//! `create` to `inject`. An [`AnchorId`] is the hash of the `identity`
+//! subtree *alone*, through the identity normal form (`anchor.identity`) —
+//! a different mapping than the general codec, so [`CaptureHandle::anchor_id`]
+//! decodes the binding and recomputes it rather than reading any oid off
+//! the handle's own tree.
 
-use facet_git_tree::ObjectStore;
+use facet_git_tree::normal_form::{self, NormalForm};
 use gix::ObjectId;
-use gix_object::{Find, Kind};
+use gix_object::Find;
 
 use crate::error::{Error, Result};
 
@@ -23,27 +22,26 @@ use crate::error::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CaptureHandle(ObjectId);
 
-/// The content hash of a binding's `identity` subtree alone
-/// (`anchor.identity`).
+/// The content hash of a binding's `identity` subtree alone, through the
+/// identity normal form (`anchor.identity`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnchorId(ObjectId);
 
 impl CaptureHandle {
-    /// The [`AnchorId`] this handle's binding resolves to: `identity`'s oid,
-    /// located by walking the handle's tree rather than decoding `hints`.
+    /// The [`AnchorId`] this handle's binding resolves to: decodes the
+    /// binding the handle names and recomputes its `identity` subtree's
+    /// normal-form hash — never the general codec's oid for that subtree,
+    /// which the handle's own tree cannot be read off directly (`anchor.identity`).
     ///
     /// # Errors
     ///
-    /// [`Error::Object`] when `self` does not decode as a binding tree (the
-    /// externally-tagged, single-entry-then-`identity`/`hints` shape every
-    /// [`crate::Binding`] variant serializes to).
+    /// [`Error::Deserialize`] when `self` does not decode as a
+    /// [`crate::Binding`].
     pub fn anchor_id<F>(&self, store: &F) -> Result<AnchorId>
     where
         F: Find + ?Sized,
     {
-        let payload = only_entry(self.0, store)?;
-        let identity = named_entry(payload, "identity", store)?;
-        Ok(AnchorId(identity))
+        crate::binding::Binding::deserialize(self, store)?.anchor_id()
     }
 }
 
@@ -91,70 +89,24 @@ impl std::str::FromStr for CaptureHandle {
     }
 }
 
-/// The content hash of an identity subtree, in a throwaway in-memory store —
-/// the one place that knows an anchor id is `identity`'s hash, never
+/// Any `Binding` variant's `identity` subtree, expressed in the identity
+/// normal form's closed universe (`facet_git_tree::normal_form`) — the
+/// mapping [`hash_identity`] hashes through, frozen independent of the
+/// general codec (ARCHITECTURE.md, "Identity normal form"). Implemented by
+/// hand, not derived, because the normal form has no reflection path from an
+/// arbitrary `Facet` type: each identity struct names its own fields.
+pub(crate) trait IdentityNormalForm {
+    /// `self`, as a [`NormalForm`] value.
+    fn to_normal_form(&self) -> NormalForm;
+}
+
+/// The content hash of an identity subtree, through the identity normal
+/// form — the one place that knows an anchor id is `identity`'s hash, never
 /// `hints`'s. [`Anchor::id`](crate::Anchor::id) and [`crate::Binding::anchor_id`]
 /// both delegate here.
-pub(crate) fn hash_identity<T>(identity: &T) -> Result<AnchorId>
-where
-    T: for<'a> facet::Facet<'a>,
-{
-    let store = ObjectStore::default();
-    let oid = facet_git_tree::serialize_into(identity, &store)?;
+pub(crate) fn hash_identity<T: IdentityNormalForm>(identity: &T) -> Result<AnchorId> {
+    let (oid, _store) = normal_form::hash(&identity.to_normal_form()).map_err(Error::NormalForm)?;
     Ok(AnchorId::from(oid))
-}
-
-/// `id`'s tree, asserted to hold exactly one entry — every [`crate::Binding`]
-/// variant carries fields, so its externally-tagged encoding always wraps
-/// the payload in a single `<variant name> → payload` entry — that entry's
-/// own oid.
-fn only_entry<F>(id: ObjectId, store: &F) -> Result<ObjectId>
-where
-    F: Find + ?Sized,
-{
-    match tree_entries(id, store)?.as_slice() {
-        [(_, oid)] => Ok(*oid),
-        _ => Err(Error::Object(format!(
-            "{id} is not a single-entry binding tree"
-        ))),
-    }
-}
-
-/// The oid of `tree`'s entry named `name`.
-fn named_entry<F>(tree: ObjectId, name: &str, store: &F) -> Result<ObjectId>
-where
-    F: Find + ?Sized,
-{
-    tree_entries(tree, store)?
-        .into_iter()
-        .find(|(entry_name, _)| entry_name == name)
-        .map(|(_, oid)| oid)
-        .ok_or_else(|| Error::Object(format!("{tree} has no {name:?} entry")))
-}
-
-/// `id`'s decoded tree entries as `(name, oid)` pairs.
-fn tree_entries<F>(id: ObjectId, store: &F) -> Result<Vec<(String, ObjectId)>>
-where
-    F: Find + ?Sized,
-{
-    let mut buf = Vec::new();
-    let data = store
-        .try_find(&id, &mut buf)
-        .map_err(|error| Error::Object(error.to_string()))?
-        .ok_or_else(|| Error::Object(format!("object {id} not found")))?;
-    if data.kind != Kind::Tree {
-        return Err(Error::Object(format!("{id} is not a tree")));
-    }
-    let tree = gix_object::TreeRef::from_bytes(data.data, id.kind())
-        .map_err(|error| Error::Object(error.to_string()))?;
-    tree.entries
-        .iter()
-        .map(|entry| {
-            let name = std::str::from_utf8(entry.filename)
-                .map_err(|_error| Error::Object(format!("non-utf8 entry name in tree {id}")))?;
-            Ok((name.to_owned(), entry.oid.to_owned()))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -195,24 +147,19 @@ mod tests {
     }
 
     #[test]
-    fn anchor_id_of_a_non_position_binding_is_its_identity_subtree() {
+    fn anchor_id_of_a_non_position_binding_is_its_identity_subtree_through_the_normal_form() {
         let store = ObjectStore::default();
         let commit = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
+        let identity = CommitIdentity {
+            commit: commit.into(),
+        };
         let binding = Binding::Commit {
-            identity: CommitIdentity {
-                commit: commit.into(),
-            },
+            identity,
             hints: NoHints {},
         };
         let handle = binding.serialize_into(&store).unwrap();
-        let expected: ObjectId = facet_git_tree::serialize_into(
-            &CommitIdentity {
-                commit: commit.into(),
-            },
-            &store,
-        )
-        .unwrap();
-        assert_eq!(ObjectId::from(handle.anchor_id(&store).unwrap()), expected);
+        let expected = hash_identity(&identity).unwrap();
+        assert_eq!(handle.anchor_id(&store).unwrap(), expected);
     }
 
     #[test]

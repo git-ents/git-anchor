@@ -24,31 +24,60 @@
 //! [`Binding::deserialize`] round-trip it, via a [`crate::CaptureHandle`],
 //! through `facet-git-tree`'s externally-tagged enum encoding directly.
 
+use std::collections::BTreeMap;
+
 use facet::Facet;
+use facet_git_tree::normal_form::NormalForm;
 use gix::ObjectId;
 use gix_object::{Find, Write};
 
 use crate::anchor::Anchor;
 use crate::error::{Error, Result};
-use crate::handle::{AnchorId, CaptureHandle, hash_identity};
+use crate::handle::{AnchorId, CaptureHandle, IdentityNormalForm, hash_identity};
 use crate::oid::Oid;
-use crate::projection::{Projection, project};
+use crate::oracle::{diff_trace, fingerprint};
 use crate::util::resolve_commit;
 
 /// [`Binding::Commit`]'s identity: the commit itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[facet(facet_git_tree::identity_key)]
 pub struct CommitIdentity {
     /// The commit named by this binding.
     pub commit: Oid,
 }
 
+impl IdentityNormalForm for CommitIdentity {
+    fn to_normal_form(&self) -> NormalForm {
+        NormalForm::Struct(BTreeMap::from([(
+            "commit".to_owned(),
+            NormalForm::Hash(ObjectId::from(self.commit)),
+        )]))
+    }
+}
+
 /// [`Binding::Hybrid`]'s identity: a parent commit plus a body tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[facet(facet_git_tree::identity_key)]
 pub struct HybridIdentity {
     /// The parent commit.
     pub commit: Oid,
     /// The body tree.
     pub tree: Oid,
+}
+
+impl IdentityNormalForm for HybridIdentity {
+    fn to_normal_form(&self) -> NormalForm {
+        NormalForm::Struct(BTreeMap::from([
+            (
+                "commit".to_owned(),
+                NormalForm::Hash(ObjectId::from(self.commit)),
+            ),
+            (
+                "tree".to_owned(),
+                NormalForm::Hash(ObjectId::from(self.tree)),
+            ),
+        ]))
+    }
 }
 
 /// No stored hints. `facet-git-tree` writes every field present as a
@@ -58,9 +87,19 @@ pub struct NoHints {}
 
 /// [`Binding::Tree`]'s identity: the tree alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[facet(facet_git_tree::identity_key)]
 pub struct TreeIdentity {
     /// The bound tree's identity.
     pub tree: Oid,
+}
+
+impl IdentityNormalForm for TreeIdentity {
+    fn to_normal_form(&self) -> NormalForm {
+        NormalForm::Struct(BTreeMap::from([(
+            "tree".to_owned(),
+            NormalForm::Hash(ObjectId::from(self.tree)),
+        )]))
+    }
 }
 
 /// [`Binding::Tree`]'s retained provenance — advisory, never identity-bearing.
@@ -75,11 +114,27 @@ pub struct TreeHints {
 
 /// [`Binding::Delta`]'s identity: the `(base_tree, head_tree)` pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
+#[facet(facet_git_tree::identity_key)]
 pub struct DeltaIdentity {
     /// The tree before the transformation.
     pub base_tree: Oid,
     /// The tree after the transformation.
     pub head_tree: Oid,
+}
+
+impl IdentityNormalForm for DeltaIdentity {
+    fn to_normal_form(&self) -> NormalForm {
+        NormalForm::Struct(BTreeMap::from([
+            (
+                "base_tree".to_owned(),
+                NormalForm::Hash(ObjectId::from(self.base_tree)),
+            ),
+            (
+                "head_tree".to_owned(),
+                NormalForm::Hash(ObjectId::from(self.head_tree)),
+            ),
+        ]))
+    }
 }
 
 /// [`Binding::Delta`]'s retained provenance — advisory, never identity-bearing.
@@ -187,7 +242,7 @@ impl Binding {
                 ObjectId::from(hints.base_witness),
                 ObjectId::from(hints.head_witness),
             ],
-            Self::Position(anchor) => vec![ObjectId::from(anchor.identity.genesis)],
+            Self::Position(anchor) => vec![ObjectId::from(anchor.identity.genesis_rev)],
         }
     }
 
@@ -513,15 +568,30 @@ fn delta_validity(
     }
 }
 
-/// [`Binding::Position`]'s [`Validity`]: [`crate::project`]'s four outcomes
-/// collapsed to three, with an unresolvable `at` reported as
-/// [`Validity::Unknown`] rather than propagated — every other
-/// [`crate::project`] error is a clearer sign of a broken anchor than of an
-/// unevaluable state, so those propagate.
+/// [`Binding::Position`]'s [`Validity`]: [`Validity::Valid`] iff
+/// [`diff_trace`] — exact history tracing — reports any candidate at all,
+/// [`Validity::Unknown`] when `at` cannot be resolved, and
+/// [`Validity::Stale`] otherwise, with one exception: once the anchor's own
+/// commit is gone [`diff_trace`] can report nothing at all (absent-safe, not
+/// an error), so this falls back to asking whether [`fingerprint`] recovers
+/// an exact (confidence-`1.0`) match at `at` before calling it stale —
+/// [`diff_trace`]'s own retained fingerprint recomputation, not a
+/// hand-rolled threshold, since a perfect fingerprint match is the same
+/// signal a surviving commit tree would have given directly.
 fn position_validity(repo: &gix::Repository, anchor: &Anchor, at: &str) -> Result<Validity> {
-    match project(repo, anchor, at) {
-        Ok(Projection::Current | Projection::Relocated { .. }) => Ok(Validity::Valid),
-        Ok(Projection::Outdated { .. } | Projection::Deleted) => Ok(Validity::Stale),
+    match diff_trace(repo, anchor, at) {
+        Ok(candidates) if !candidates.is_empty() => Ok(Validity::Valid),
+        Ok(_) if !repo.has_object(ObjectId::from(anchor.identity.genesis_rev)) => {
+            match fingerprint(repo, anchor, at) {
+                Ok(candidates) if candidates.iter().any(|c| c.confidence >= 1.0) => {
+                    Ok(Validity::Valid)
+                }
+                Ok(_) => Ok(Validity::Stale),
+                Err(Error::Resolve(_)) => Ok(Validity::Unknown),
+                Err(other) => Err(other),
+            }
+        }
+        Ok(_) => Ok(Validity::Stale),
         Err(Error::Resolve(_)) => Ok(Validity::Unknown),
         Err(other) => Err(other),
     }
@@ -647,7 +717,7 @@ mod tests {
         };
         assert_eq!(
             binding.witnesses(),
-            vec![ObjectId::from(anchor.identity.genesis)]
+            vec![ObjectId::from(anchor.identity.genesis_rev)]
         );
     }
 
@@ -714,7 +784,7 @@ mod tests {
         .unwrap();
 
         let mut same_identity = anchor.clone();
-        same_identity.hints.context = b"unrelated\n".to_vec();
+        same_identity.hints.fingerprints.clear();
         assert_eq!(anchor.identity, same_identity.identity);
         assert_ne!(
             Binding::Position(anchor.clone()),

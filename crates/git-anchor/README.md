@@ -63,9 +63,7 @@ git anchor inject <kind> [<text>] --anchor <HANDLE>   # write an entity of <kind
                                                         #   <text>. The binding field is always the injected --anchor handle, overriding
                                                         #   anything this literal sets there.
 git anchor list <kind> [--json]                       # every entity of <kind>, name plus value
-git anchor show <kind> <name> [--json]                # one entity by its full name, as printed by inject/list
-git anchor show <kind> <name>@<rev> [--json]          # project a position binding onto another revision
-git anchor show <kind> <name> --worktree [--json]     # project a position binding onto the working tree
+git anchor show <kind> <name> [--json]                # one entity by its full name, as printed by inject/list — exactly as stored
 git anchor remove <kind> <name>...  (alias: rm)       # delete one or more entities, all checked to exist before any is removed
 ```
 
@@ -78,8 +76,9 @@ A required field neither the binding nor `<text>` can fill refuses `inject` outr
 ## How it works
 
 `git anchor` is a thin CLI over [`gix-store`](https://github.com/git-ents/git-store)'s dynamic (schema-only) read/write path: `inject` fetches `<kind>`'s published `Schema`, locates the field structurally equal to `Binding`'s own schema, and writes a `facet_value::Value` conforming to it — never a compiled Rust type.
-`show <name>@<rev>` and `show <name> --worktree` re-derive where a position binding sits elsewhere, exactly as [`gix-anchor`](../gix-anchor)'s `project`/`project_worktree` always did; they operate on the `Binding` extracted from the read entity, not on any document-specific field.
-The document embeds the anchor's hints inline, so the retained content stays reachable — no gitlinks, no copies.
+`show` prints an entity exactly as stored and resolves nothing: mapping a position binding onto another revision is [`gix-anchor`](../gix-anchor)'s oracle chain (`diff_trace`/`fingerprint_oracle`/`op_log`), which is library-internal — no command here calls it.
+Resolution is `git-query`'s `bind/5`.
+The document embeds the anchor's hints inline, so they stay reachable — no gitlinks, no copies.
 `create` and `inject` are deliberately separate verbs: because a capture handle is content-addressed, one `create` can back any number of `inject`s, into any number of kinds, by any number of callers.
 
 ## License

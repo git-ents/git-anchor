@@ -76,8 +76,19 @@ pub(crate) fn head(dir: &Path) -> String {
 }
 
 /// `range.map(|n| "line {n}\n")` concatenated — the numbered fixture file
-/// every projection test edits.
+/// every oracle test edits.
 #[must_use]
 pub(crate) fn numbered(range: std::ops::RangeInclusive<u32>) -> String {
     range.map(|n| format!("line {n}\n")).collect()
+}
+
+/// A fresh in-memory [`gix_store::Store`], for [`crate::pin`]'s schema
+/// registration tests.
+#[must_use]
+pub(crate) fn empty_store()
+-> gix_store::Store<gix_store::MemoryRefStore, facet_git_tree::ObjectStore> {
+    gix_store::Store::new(
+        gix_store::MemoryRefStore::new(),
+        facet_git_tree::ObjectStore::default(),
+    )
 }

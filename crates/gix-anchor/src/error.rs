@@ -2,12 +2,12 @@
 
 use gix::ObjectId;
 
-/// Everything that can go wrong capturing or projecting an [`crate::Anchor`].
+/// Everything that can go wrong capturing an [`crate::Anchor`] or running
+/// one of the [`crate::oracle`] functions over it.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A revision string ([`crate::capture`]'s or [`crate::project`]'s
-    /// `revision`/`target` argument) could not be resolved to a commit in
-    /// the repository.
+    /// A revision string (a `revision`/`target` argument) could not be
+    /// resolved to a commit in the repository.
     #[error("could not resolve {0:?}")]
     Resolve(String),
     /// A git object could not be read or decoded.
@@ -27,7 +27,8 @@ pub enum Error {
         path: String,
     },
     /// The line range does not fit the file it is anchored to
-    /// (`anchor.definition`'s line-range validation).
+    /// (`anchor.definition`'s validation, applied to the byte span it
+    /// canonicalizes to).
     #[error("lines {start}..={end} do not fit {path:?} ({len} lines)")]
     LinesOutOfRange {
         /// The file the range was checked against.
@@ -39,17 +40,10 @@ pub enum Error {
         /// How many lines the file actually has.
         len: u64,
     },
-    /// [`crate::project_exact`]'s anchor commit is no longer present in the
-    /// repository (garbage collected) — [`crate::project`] catches this and
-    /// retries with [`crate::project_from_context`]
-    /// (`anchor.fuzzy-fallback`); a caller invoking
-    /// [`crate::project_exact`] directly sees it as an ordinary error.
-    #[error("the anchor commit {0} no longer exists")]
-    AnchorCommitMissing(ObjectId),
-    /// [`crate::capture_worktree`] or [`crate::project_worktree`] was asked
-    /// to read the working tree of a repository that has none (a bare
-    /// repository). Capture or project against a revision instead
-    /// (`anchor.working-tree` applies only where a working tree exists).
+    /// [`crate::capture_worktree`] was asked to read the working tree of a
+    /// repository that has none (a bare repository). Capture against a
+    /// revision instead (`anchor.working-tree` applies only where a working
+    /// tree exists).
     #[error("the repository has no working tree")]
     NoWorkingTree,
     /// Encoding a [`crate::Binding`] through the underlying `facet-git-tree`
@@ -62,6 +56,15 @@ pub enum Error {
     /// `gix` object store the codec was given.
     #[error(transparent)]
     Deserialize(#[from] facet_git_tree::DeserializeError),
+    /// Hashing an identity subtree through the identity normal form
+    /// (`anchor.identity`) failed — a backend error from the object store
+    /// the write was given, or a name the frozen mapping cannot express.
+    #[error(transparent)]
+    NormalForm(#[from] facet_git_tree::NormalFormError),
+    /// [`crate::register_rebind_pin_schema`] could not register the
+    /// `rebind pin` payload schema.
+    #[error("registering the rebind-pin schema failed: {0}")]
+    SchemaRegistration(String),
 }
 
 /// The `Result` alias every `gix-anchor` operation returns.
