@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/gix-anchor",
+    "crates/gix-attest",
     "crates/git-anchor",
     "crates/test-support",
 ]
