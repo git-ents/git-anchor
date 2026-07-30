@@ -16,17 +16,22 @@
 //!   header — **attest contributes zero signing code**;
 //! - the chain walk is store's first-parent history.
 //!
-//! `verify` is deliberately absent from this module and from this phase: it
-//! is cryptography, it lives in [`crate::verify`], and Phase 2 writes it.
-//! Nothing here reports on a signature, so nothing here can be mistaken for
-//! having checked one.
+//! `verify` is deliberately absent from this module: it is cryptography, and
+//! it lives in [`crate::verify`]. Nothing here reports on a signature, so
+//! nothing here can be mistaken for having checked one.
+//!
+//! Two claim kinds *are* understood here, because they are the envelope
+//! machinery itself: revocation ([`Claims::revoke`]) and key lifecycle
+//! ([`Claims::add_key`](crate::Claims::add_key), in [`crate::key`]). A third
+//! would be the abstraction leaking — every other payload kind is a label
+//! this crate carries and never matches on.
 
 use gix::ObjectId;
 use gix::objs::{Find, Write};
 use gix_store::{Committer, Layout, RefName, RefPath, RefPrefix, RefSegment, RefStore, Store};
 
 use crate::envelope::{Envelope, Target, target_key};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::schema::claim_segment;
 
 /// One claim: its id, its envelope, and whether the chain structurally
@@ -40,8 +45,12 @@ pub struct Claim {
     /// The revocation claim that revokes this one, if any.
     ///
     /// Always `None` from [`Claims::log`], which reports the chain as
-    /// written. It is [`Claims::resolve`] — Phase 2 — that applies
-    /// revocations structurally and fills this in; `log` has no opinion.
+    /// written. It is [`Claims::resolve`] that applies revocations
+    /// structurally and fills this in; `log` has no opinion.
+    ///
+    /// Marked, not deleted, and with no opinion on what revocation *means*:
+    /// whether a revoked claim still counts for anything is a query rule's
+    /// business.
     pub revoked_by: Option<ObjectId>,
 }
 
@@ -56,6 +65,19 @@ pub struct Claim {
 pub struct Claims<'s, R, O> {
     store: &'s Store<R, O>,
 }
+
+/// The [`Target::kind`] of a revocation's target: a claim.
+pub const CLAIM_TARGET_KIND: &str = "claim";
+
+/// The [`Target::kind`] of a key's own claim chain.
+pub const KEY_TARGET_KIND: &str = "key";
+
+/// The [`Envelope::payload_kind`] a revocation carries.
+///
+/// A revocation has nothing to say beyond *which* claim it revokes, which its
+/// target already says, so its payload is the empty tree and this label is how
+/// the chain records what the claim is.
+pub const REVOCATION_KIND: &str = "revocation";
 
 impl<'s, R, O> Claims<'s, R, O>
 where
@@ -88,12 +110,61 @@ where
     /// [`gix_store::Error::NoSchema`] when
     /// [`register_claim_schema`](crate::register_claim_schema) has not run.
     pub fn sign(&self, envelope: &Envelope) -> Result<ObjectId> {
-        let name = Self::entity_name(&envelope.target)?;
+        self.append(&envelope.target, envelope)
+    }
+
+    /// Revoke `claim`, signing the revocation with the key `key` names, and
+    /// return the revocation's own claim id.
+    ///
+    /// The revocation is a claim whose target is
+    /// `{kind: "claim", id: <claim>}`, appended to *`claim`'s own ref* — so
+    /// the chain that carries a claim carries its revocation too, and reading
+    /// the chain is enough to see it. [`resolve`](Self::resolve) is what
+    /// applies it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Store`] when `claim` cannot be read or the revocation cannot
+    /// be written, plus [`sign`](Self::sign)'s errors for the derived names.
+    pub fn revoke(&self, claim: ObjectId, key: crate::Oid) -> Result<ObjectId> {
+        let revoked = self.envelope_at(claim)?;
+        let envelope = Envelope {
+            target: Target {
+                kind: CLAIM_TARGET_KIND.to_owned(),
+                id: claim.into(),
+            },
+            payload: gix::ObjectId::empty_tree(gix::hash::Kind::Sha1).into(),
+            payload_kind: REVOCATION_KIND.to_owned(),
+            key,
+        };
+        self.append(&revoked.target, &envelope)
+    }
+
+    /// Append a claim carrying `envelope` to the chain of `on`, which is
+    /// `envelope.target` for an ordinary claim and the *revoked* claim's
+    /// target for a revocation.
+    pub(crate) fn append(&self, on: &Target, envelope: &Envelope) -> Result<ObjectId> {
+        let name = Self::entity_name(on)?;
         let summary = format!("claim {}", envelope.payload_kind);
         Ok(self
             .store
             .kind::<Envelope>(claim_segment())
             .update(&name, |_current| (summary.clone(), envelope.clone()))?)
+    }
+
+    /// The envelope of the claim `claim`, read out of that commit's own tree.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Store`] when the commit cannot be read or its envelope
+    /// decoded — including when `claim` is not a claim commit at all.
+    pub fn envelope_at(&self, claim: ObjectId) -> Result<Envelope> {
+        Ok(self.store.kind::<Envelope>(claim_segment()).get_at(claim)?)
+    }
+
+    /// The store these claims live in.
+    pub(crate) fn store(&self) -> &'s Store<R, O> {
+        self.store
     }
 
     /// The chain of claims on `target`, newest first.
@@ -125,15 +196,38 @@ where
         Ok(claims.into_iter())
     }
 
-    /// [`log`](Self::log) with revocations applied structurally.
+    /// [`log`](Self::log) with revocations applied structurally: newest
+    /// first, with every revoked claim carrying the id of the revocation that
+    /// revoked it in [`Claim::revoked_by`].
+    ///
+    /// Structural means exactly what the chain records and no more. A
+    /// revocation on this chain whose target names a claim on it marks that
+    /// claim; nothing is dropped, nothing is re-ordered, and what a mark
+    /// *means* — whether the claim still counts, whether the revocation
+    /// reaches claims admitted before it — is a query rule's, not this
+    /// function's.
     ///
     /// # Errors
     ///
-    /// Always [`Error::Unimplemented`]: revocation is Phase 2's native
-    /// vocabulary, and answering "nothing is revoked" before it exists would
-    /// be a false negative dressed as an answer.
-    pub fn resolve(&self, _target: &Target) -> Result<Vec<Claim>> {
-        Err(Error::Unimplemented("resolve"))
+    /// As [`log`](Self::log).
+    pub fn resolve(&self, target: &Target) -> Result<Vec<Claim>> {
+        let mut claims: Vec<Claim> = self.log(target)?.collect();
+        let revocations: Vec<(ObjectId, ObjectId)> = claims
+            .iter()
+            .filter(|claim| is_revocation(&claim.envelope))
+            .map(|claim| (claim.envelope.target.id.into(), claim.id))
+            .collect();
+        for (revoked, revocation) in revocations {
+            for claim in &mut claims {
+                if claim.id == revoked {
+                    // Newest first, so the first revocation seen for a claim
+                    // is the newest; a second one changes nothing about the
+                    // fact recorded.
+                    claim.revoked_by.get_or_insert(revocation);
+                }
+            }
+        }
+        Ok(claims)
     }
 
     /// The ref the claims about `target` live on.
@@ -154,6 +248,14 @@ where
     fn entity_name(target: &Target) -> Result<RefPath> {
         Ok(RefSegment::new(target_key(target)?.to_string())?.into())
     }
+}
+
+/// Whether `envelope` is a revocation: a claim about a claim, labeled as one.
+///
+/// The only payload-kind match in this crate besides the key claim's, and both
+/// are envelope machinery rather than vocabulary — see the module docs.
+fn is_revocation(envelope: &Envelope) -> bool {
+    envelope.target.kind == CLAIM_TARGET_KIND && envelope.payload_kind == REVOCATION_KIND
 }
 
 /// The [`Layout`] that puts claim refs at `refs/claims/<target-key>`, the ref
@@ -182,7 +284,7 @@ mod tests {
     use gix_store::MemoryRefStore;
 
     use super::*;
-    use crate::fixture::{envelope, target};
+    use crate::fixture::{envelope, oid, target};
     use crate::schema::register_claim_schema;
 
     fn store() -> Store<MemoryRefStore, facet_git_tree::ObjectStore> {
@@ -270,12 +372,68 @@ mod tests {
         );
     }
 
+    /// An unrevoked chain resolves to itself: `resolve` invents no marks.
     #[test]
-    fn resolve_refuses_rather_than_reporting_nothing_revoked() {
+    fn resolve_marks_nothing_on_a_chain_with_no_revocation() {
         let store = store();
-        let error = Claims::open(&store)
-            .resolve(&target("anchor", 0x7f))
-            .unwrap_err();
-        assert!(matches!(error, Error::Unimplemented("resolve")), "{error}");
+        let claims = Claims::open(&store);
+        claims
+            .sign(&envelope("anchor", 0x7f, "rebind-pin"))
+            .unwrap();
+        claims.sign(&envelope("anchor", 0x7f, "review")).unwrap();
+
+        let resolved = claims.resolve(&target("anchor", 0x7f)).unwrap();
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved.iter().all(|claim| claim.revoked_by.is_none()));
+    }
+
+    /// A revocation lands on the revoked claim's own ref — the chain records
+    /// it — and `resolve` marks exactly the claim it names.
+    #[test]
+    fn a_revocation_chains_on_the_revoked_claims_ref_and_marks_only_it() {
+        let store = store();
+        let claims = Claims::open(&store);
+        let first = claims
+            .sign(&envelope("anchor", 0x7f, "rebind-pin"))
+            .unwrap();
+        let second = claims.sign(&envelope("anchor", 0x7f, "review")).unwrap();
+        let revocation = claims.revoke(first, oid(0xbb).into()).unwrap();
+
+        // The revocation is a claim on the revoked claim's chain, not on the
+        // chain of its own `{kind: "claim"}` target.
+        let resolved = claims.resolve(&target("anchor", 0x7f)).unwrap();
+        assert_eq!(
+            resolved.iter().map(|claim| claim.id).collect::<Vec<_>>(),
+            vec![revocation, second, first],
+        );
+        assert_eq!(
+            claims
+                .log(&Target {
+                    kind: CLAIM_TARGET_KIND.to_owned(),
+                    id: first.into(),
+                })
+                .unwrap()
+                .count(),
+            0,
+            "a revocation starts no chain of its own"
+        );
+
+        let marks: Vec<_> = resolved
+            .iter()
+            .map(|claim| (claim.id, claim.revoked_by))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                (revocation, None),
+                (second, None),
+                (first, Some(revocation))
+            ],
+            "exactly the revoked claim is marked, and it is marked rather than dropped"
+        );
+        assert_eq!(
+            resolved[0].envelope.payload_kind, REVOCATION_KIND,
+            "the revocation is itself a claim on the chain"
+        );
     }
 }

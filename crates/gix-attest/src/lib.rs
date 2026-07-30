@@ -23,20 +23,30 @@
 //! direction, and CI proves it over `cargo metadata`. `"anchor"` occurs in
 //! this crate only as an uninterpreted [`Target::kind`] label in tests.
 //!
-//! # Phase coverage
+//! # Native vocabulary
 //!
-//! What exists: [`Envelope`], [`Target`], [`target_key`],
-//! [`register_claim_schema`], and [`Claims`] — `open`, `sign`, `log`.
-//! [`Claims::resolve`] refuses with [`Error::Unimplemented`] rather than
-//! reporting an unrevoked chain it has not checked, and no `verify` exists at
-//! all; [`key`] and [`verify`] say what fills them.
+//! Two claim kinds are attest's own, because they are the envelope machinery
+//! itself and nothing else is:
+//!
+//! - **revocation** — [`Claims::revoke`] appends a claim about a claim to the
+//!   revoked claim's own ref, and [`Claims::resolve`] marks it. Marked, not
+//!   deleted: what revocation *means* is a query rule's business.
+//! - **key add / rotate** — [`Claims::add_key`] and [`Claims::rotate_key`]
+//!   publish [`AttestKey`] docs on the key's own claim chain, and
+//!   [`Claims::verify`] resolves [`Envelope::key`] through it,
+//!   crypto-verifying every rotation on the way.
+//!
+//! [`Claims::verify`] is cryptography and nothing else. Its [`Verdict`] has no
+//! `Valid` variant, because claim validity is `key_valid_at` — a query
+//! predicate over op-log admission order — and no shape in this crate can be
+//! mistaken for it.
 //!
 //! # Examples
 //!
 //! Sign two claims about one target and walk the chain:
 //!
 //! ```
-//! use gix_attest::{Claims, Envelope, Target, register_claim_schema};
+//! use gix_attest::{Claims, Envelope, Target, register_schemas};
 //! use gix_store::{MemoryRefStore, Store};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +57,7 @@
 //!     facet_git_tree::ObjectStore::default(),
 //!     gix_attest::layout(),
 //! );
-//! register_claim_schema(&store)?;
+//! register_schemas(&store)?;
 //!
 //! // `"anchor"` is a label this crate never interprets, and the payload is a
 //! // tree hash it never fetches.
@@ -88,8 +98,12 @@ mod oid;
 mod schema;
 pub mod verify;
 
-pub use chain::{Claim, Claims, layout};
+pub use chain::{CLAIM_TARGET_KIND, Claim, Claims, KEY_TARGET_KIND, REVOCATION_KIND, layout};
 pub use envelope::{Envelope, Target, target_key};
 pub use error::{Error, Result};
+pub use key::AttestKey;
 pub use oid::Oid;
-pub use schema::{CLAIM_KIND, register_claim_schema};
+pub use schema::{
+    CLAIM_KIND, KEY_KIND, register_claim_schema, register_key_schema, register_schemas,
+};
+pub use verify::{Verdict, Verifier};

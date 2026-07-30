@@ -1,12 +1,12 @@
 //! Registration of the kinds attest owns at `refs/schema/*`.
 //!
-//! Attest registers exactly one kind this phase: the [`Envelope`], the claim
-//! machinery itself. Payload schemas belong to their vocabulary owners —
-//! `rebind pin` to anchor, action records to the action schema, review
-//! assertions to forge — and attest registers none of them, because it
-//! carries payload hashes without understanding them. (Phase 2 adds one
-//! more, `AttestKey`, for the same reason the envelope qualifies: key
-//! material *is* envelope machinery.)
+//! Attest registers exactly two kinds: the [`Envelope`], the claim machinery
+//! itself, and [`AttestKey`], for the same reason the envelope qualifies —
+//! key material *is* envelope machinery, and a verifier that could not read a
+//! key doc could verify nothing. Every other payload schema belongs to its
+//! vocabulary owner — `rebind pin` to anchor, action records to the action
+//! schema, review assertions to forge — and attest registers none of them,
+//! because it carries payload hashes without understanding them.
 //!
 //! Registration is also the enforcement point for the frozen target
 //! descriptor. [`gix_store::KindSchema::write`] runs `check_identity_subtrees`
@@ -20,10 +20,17 @@ use gix_store::{Committer, RefSegment, RefStore, Store, schema_of};
 
 use crate::envelope::Envelope;
 use crate::error::{Error, Result};
+use crate::key::AttestKey;
 
 /// The kind name an [`Envelope`] schema is published under, and the segment
 /// claim refs are grouped by (`refs/claims/<target-key>`).
 pub const CLAIM_KIND: &str = "claims";
+
+/// The kind name an [`AttestKey`] schema is published under, and therefore the
+/// [`Envelope::payload_kind`](crate::Envelope::payload_kind) a key claim
+/// carries: consumers join a payload kind against `refs/schema/<kind>`, so the
+/// label and the kind are one string.
+pub const KEY_KIND: &str = "keys";
 
 /// The ref segment [`CLAIM_KIND`] names.
 ///
@@ -33,6 +40,16 @@ pub const CLAIM_KIND: &str = "claims";
 /// [`tests::the_claim_kind_is_a_valid_ref_segment`].
 pub(crate) fn claim_segment() -> RefSegment {
     RefSegment::new(CLAIM_KIND).expect("the claim kind is a valid ref segment")
+}
+
+/// The ref segment [`KEY_KIND`] names.
+///
+/// # Panics
+///
+/// Never: [`KEY_KIND`] is a valid ref segment, checked by
+/// [`tests::the_key_kind_is_a_valid_ref_segment`].
+pub(crate) fn key_segment() -> RefSegment {
+    RefSegment::new(KEY_KIND).expect("the key kind is a valid ref segment")
 }
 
 /// Register [`Envelope`]'s schema under [`CLAIM_KIND`] in `store`.
@@ -62,6 +79,48 @@ where
         })
 }
 
+/// Register [`AttestKey`]'s schema under [`KEY_KIND`] in `store`.
+///
+/// The one payload schema attest registers. Key claims cannot be written or
+/// read without it, so [`Claims::add_key`](crate::Claims::add_key) and
+/// verification both require it to have run.
+///
+/// # Errors
+///
+/// [`Error::Schema`] when the schema cannot be derived from [`AttestKey`], and
+/// [`Error::SchemaRegistration`] when the store write fails.
+pub fn register_key_schema<R, O>(store: &Store<R, O>) -> Result<gix::ObjectId>
+where
+    R: RefStore + Committer,
+    O: Find + Write,
+{
+    let schema = schema_of::<AttestKey>()?;
+    store
+        .dynamic(key_segment())
+        .schema()
+        .put(&schema)
+        .map_err(|source| Error::SchemaRegistration {
+            kind: KEY_KIND,
+            source: Box::new(source),
+        })
+}
+
+/// Register every kind attest owns: [`register_claim_schema`] and
+/// [`register_key_schema`].
+///
+/// # Errors
+///
+/// As the two functions it calls.
+pub fn register_schemas<R, O>(store: &Store<R, O>) -> Result<()>
+where
+    R: RefStore + Committer,
+    O: Find + Write,
+{
+    register_claim_schema(store)?;
+    register_key_schema(store)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic, reason = "unit test")]
@@ -76,6 +135,24 @@ mod tests {
     #[test]
     fn the_claim_kind_is_a_valid_ref_segment() {
         assert_eq!(claim_segment().as_str(), CLAIM_KIND);
+    }
+
+    #[test]
+    fn the_key_kind_is_a_valid_ref_segment() {
+        assert_eq!(key_segment().as_str(), KEY_KIND);
+    }
+
+    /// Both kinds, and only those two: a payload schema attest registered
+    /// would be a payload attest understood.
+    #[test]
+    fn registering_publishes_exactly_the_two_kinds_attest_owns() {
+        let store: Store<MemoryRefStore, facet_git_tree::ObjectStore> = memory_store();
+        register_schemas(&store).unwrap();
+        assert_eq!(
+            store.kinds().unwrap(),
+            vec![claim_segment(), key_segment()],
+            "the envelope and its key material, nothing else"
+        );
     }
 
     #[test]
