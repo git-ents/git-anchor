@@ -122,4 +122,4 @@ pub use oracle::{
     Candidate, DIFF_TRACE_ALGORITHM, DIFF_TRACE_ORACLE_VERSION, OpLogSource, Oracle, diff_trace,
     fingerprint as fingerprint_oracle, minhash_similarity, op_log,
 };
-pub use pin::{RebindPin, register_rebind_pin_schema};
+pub use pin::{REBIND_PIN_KIND, RebindPin, register_rebind_pin_schema};
