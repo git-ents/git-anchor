@@ -23,8 +23,8 @@ use facet_git_tree::{
 };
 use facet_value::{VObject, Value};
 use gix_anchor::{
-    Anchor, Binding, CommitIdentity, LineRange, NoHints, Projection, capture, capture_worktree,
-    project, project_worktree, snippet,
+    Anchor, Binding, CaptureHandle, CommitIdentity, LineRange, NoHints, Projection, capture,
+    capture_worktree, project, project_worktree, snippet,
 };
 use gix_store::{
     DocumentBuilder, Layout, RefPath, RefPrefix, RefSegment, RepoStore, entity_name_under,
@@ -48,8 +48,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Capture a binding, writing its identity and hints objects. Advances
-    /// no ref and needs no registered kind.
+    /// no ref and needs no registered kind. Prints the capture handle —
+    /// pass it to `inject --anchor` or to `id`.
     Create(CreateArgs),
+    /// Print a capture handle's anchor id: the `identity` subtree's oid,
+    /// invariant under any hint change.
+    Id(IdArgs),
     /// Write an entity of `<kind>` embedding a previously created binding.
     /// `<kind>` must be anchorable (its published schema embeds `Binding`'s
     /// shape) — this is `git anchor`'s reason to exist.
@@ -95,6 +99,13 @@ struct CreateArgs {
     worktree: bool,
 }
 
+/// Arguments for `id`.
+#[derive(clap::Args)]
+struct IdArgs {
+    /// A capture handle, as printed by `git anchor create`.
+    handle: CaptureHandle,
+}
+
 /// Arguments for `inject`.
 #[derive(clap::Args)]
 struct InjectArgs {
@@ -104,9 +115,10 @@ struct InjectArgs {
     /// with `--json`, which supplies the whole document instead.
     #[arg(conflicts_with = "json")]
     text: Option<String>,
-    /// A previously captured binding, as printed by `git anchor create`.
-    #[arg(long, value_name = "ID")]
-    anchor: gix::ObjectId,
+    /// A previously created capture handle, as printed by `git anchor
+    /// create`.
+    #[arg(long, value_name = "HANDLE")]
+    anchor: CaptureHandle,
     /// A whole `facet_value::Value` JSON literal for the document — the
     /// escape hatch when no single positional argument can fill the kind's
     /// remaining required fields. The binding field is still injected from
@@ -171,6 +183,7 @@ fn main() -> Result<()> {
     match cli.command {
         None => cmd_kinds(&store)?,
         Some(Command::Create(args)) => cmd_create(&repo, args)?,
+        Some(Command::Id(args)) => cmd_id(&repo, args)?,
         Some(Command::Inject(args)) => cmd_inject(&repo, &store, args)?,
         Some(Command::List(args)) => cmd_list(&store, &args.kind, args.json)?,
         Some(Command::Show(args)) => cmd_show(&repo, &store, args)?,
@@ -202,8 +215,9 @@ fn cmd_kinds(store: &RepoStore<'_>) -> Result<()> {
 }
 
 /// `create`: capture a binding and write it to the repository's object
-/// database. Advances no ref; the printed id is content-addressed, so
-/// capturing the same coordinates twice prints the same id.
+/// database. Advances no ref; prints the capture handle, content-addressed
+/// over identity *and* hints, so capturing the same coordinates against the
+/// same repository state twice prints the same handle.
 fn cmd_create(repo: &gix::Repository, args: CreateArgs) -> Result<()> {
     let CreateArgs {
         at,
@@ -212,7 +226,15 @@ fn cmd_create(repo: &gix::Repository, args: CreateArgs) -> Result<()> {
         worktree,
     } = args;
     let binding = build_binding(repo, at, path, lines, worktree)?;
-    let id = binding.serialize_into(repo)?;
+    let handle = binding.serialize_into(repo)?;
+    println!("{handle}");
+    Ok(())
+}
+
+/// `id`: the anchor id a capture handle resolves to — `identity`'s own oid,
+/// read directly off the handle's tree, invariant under any hint change.
+fn cmd_id(repo: &gix::Repository, args: IdArgs) -> Result<()> {
+    let id = args.handle.anchor_id(repo)?;
     println!("{id}");
     Ok(())
 }

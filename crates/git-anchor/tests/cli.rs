@@ -96,14 +96,21 @@ fn run(dir: &Path, args: &[&str]) -> (String, String, bool) {
     )
 }
 
-/// `create` with the given args, returning the printed anchor id (panics on
-/// failure — every test's `create` call is expected to succeed).
+/// `create` with the given args, returning the printed capture handle
+/// (panics on failure — every test's `create` call is expected to succeed).
 fn create(dir: &Path, args: &[&str]) -> String {
     let full: Vec<&str> = std::iter::once("create")
         .chain(args.iter().copied())
         .collect();
     let (out, err, ok) = run(dir, &full);
     assert!(ok, "create failed: {err}");
+    out.trim().to_owned()
+}
+
+/// `id <handle>`, returning the printed anchor id (panics on failure).
+fn anchor_id(dir: &Path, handle: &str) -> String {
+    let (out, err, ok) = run(dir, &["id", handle]);
+    assert!(ok, "id failed: {err}");
     out.trim().to_owned()
 }
 
@@ -137,7 +144,7 @@ fn publish<T: for<'a> Facet<'a>>(repo_path: &Path, prefix: &str, kind: &str) {
 // ── create: content-addressed, dedups ───────────────────────────────────
 
 #[test]
-fn create_with_identical_coordinates_prints_the_identical_id() {
+fn create_with_identical_coordinates_and_state_prints_the_identical_handle() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
@@ -148,8 +155,12 @@ fn create_with_identical_coordinates_prints_the_identical_id() {
     assert!(!first.is_empty());
 }
 
+/// The bug `create/inject` shipped with and then fixed: a committed capture
+/// and a `--worktree` capture of the *same span* differ only in retained
+/// hint bytes, so they must print different handles (hints differ) but
+/// resolve to the identical anchor id (identity is the same coordinates).
 #[test]
-fn create_with_worktree_captures_uncommitted_content() {
+fn committed_and_worktree_captures_of_the_same_span_share_an_anchor_id_but_not_a_handle() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
     let path = dir.path();
@@ -162,7 +173,12 @@ fn create_with_worktree_captures_uncommitted_content() {
 
     let committed = create(path, &["--path", "file.txt", "-L", "5,6"]);
     let worktree = create(path, &["--path", "file.txt", "-L", "5,6", "--worktree"]);
-    assert_ne!(committed, worktree);
+    assert_ne!(committed, worktree, "differing hints: different handles");
+    assert_eq!(
+        anchor_id(path, &committed),
+        anchor_id(path, &worktree),
+        "identical identity: the same anchor id"
+    );
 
     let (_, err, ok) = run(
         path,
@@ -173,6 +189,28 @@ fn create_with_worktree_captures_uncommitted_content() {
         err.contains("worktree") || err.contains("cannot be used"),
         "stderr: {err}"
     );
+}
+
+#[test]
+fn any_identity_coordinate_change_changes_the_anchor_id() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let path = dir.path();
+
+    let base = anchor_id(path, &create(path, &["--path", "file.txt", "-L", "2,4"]));
+
+    let different_lines = anchor_id(path, &create(path, &["--path", "file.txt", "-L", "3,5"]));
+    assert_ne!(base, different_lines);
+
+    std::fs::write(path.join("other.txt"), numbered(1..=10)).unwrap();
+    commit_all(path, "two");
+    let different_path = anchor_id(path, &create(path, &["--path", "other.txt", "-L", "2,4"]));
+    assert_ne!(base, different_path);
+
+    // "two" left file.txt itself unchanged, so this capture shares `base`'s
+    // path and lines and differs only in genesis (now the "two" commit).
+    let different_genesis = anchor_id(path, &create(path, &["--path", "file.txt", "-L", "2,4"]));
+    assert_ne!(base, different_genesis);
 }
 
 #[test]
@@ -213,9 +251,9 @@ fn inject_fills_binding_by_reflection_and_text_by_the_lone_string_field() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let id = create(path, &["--path", "file.txt", "-L", "2,4"]);
+    let handle = create(path, &["--path", "file.txt", "-L", "2,4"]);
 
-    let (out, err, ok) = run(path, &["inject", "doc", "hello world", "--anchor", &id]);
+    let (out, err, ok) = run(path, &["inject", "doc", "hello world", "--anchor", &handle]);
     assert!(ok, "inject failed: {err}");
     let name = out.trim().to_owned();
     assert!(!name.is_empty());
@@ -235,9 +273,12 @@ fn inject_accepts_a_whole_commit_binding() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (out, err, ok) = run(path, &["inject", "doc", "whole commit", "--anchor", &id]);
+    let (out, err, ok) = run(
+        path,
+        &["inject", "doc", "whole commit", "--anchor", &handle],
+    );
     assert!(ok, "inject failed: {err}");
     let name = out.trim().to_owned();
 
@@ -253,9 +294,9 @@ fn inject_refuses_a_kind_with_no_binding_field() {
     setup(dir.path());
     let path = dir.path();
     publish::<Plain>(path, "refs/anchors", "plain");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (_, err, ok) = run(path, &["inject", "plain", "hello", "--anchor", &id]);
+    let (_, err, ok) = run(path, &["inject", "plain", "hello", "--anchor", &handle]);
     assert!(!ok, "inject on a non-anchorable kind should refuse");
     assert!(err.contains("not anchorable"), "stderr: {err}");
 }
@@ -266,9 +307,9 @@ fn inject_refuses_an_ambiguous_positional_argument() {
     setup(dir.path());
     let path = dir.path();
     publish::<TwoStrings>(path, "refs/anchors", "two");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (_, err, ok) = run(path, &["inject", "two", "which one", "--anchor", &id]);
+    let (_, err, ok) = run(path, &["inject", "two", "which one", "--anchor", &handle]);
     assert!(!ok, "inject should refuse with two String candidates");
     assert!(err.contains('a') && err.contains('b'), "stderr: {err}");
 }
@@ -279,9 +320,9 @@ fn inject_refuses_required_fields_it_cannot_fill_from_the_command_line() {
     setup(dir.path());
     let path = dir.path();
     publish::<WithCount>(path, "refs/anchors", "counted");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (_, err, ok) = run(path, &["inject", "counted", "--anchor", &id]);
+    let (_, err, ok) = run(path, &["inject", "counted", "--anchor", &handle]);
     assert!(!ok, "inject should refuse an unfillable required field");
     assert!(err.contains("count"), "stderr: {err}");
 }
@@ -292,7 +333,7 @@ fn inject_json_supplies_the_document_and_still_gets_the_binding_injected() {
     setup(dir.path());
     let path = dir.path();
     publish::<WithCount>(path, "refs/anchors", "counted");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
     let (out, err, ok) = run(
         path,
@@ -302,7 +343,7 @@ fn inject_json_supplies_the_document_and_still_gets_the_binding_injected() {
             "--json",
             "{\"count\": 5}",
             "--anchor",
-            &id,
+            &handle,
         ],
     );
     assert!(ok, "inject --json failed: {err}");
@@ -322,9 +363,9 @@ fn list_and_remove_round_trip() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (out, _, ok) = run(path, &["inject", "doc", "first", "--anchor", &id]);
+    let (out, _, ok) = run(path, &["inject", "doc", "first", "--anchor", &handle]);
     assert!(ok);
     let name = out.trim().to_owned();
 
@@ -358,9 +399,9 @@ fn remove_is_atomic_on_a_bad_name() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (out, _, ok) = run(path, &["inject", "doc", "one", "--anchor", &id]);
+    let (out, _, ok) = run(path, &["inject", "doc", "one", "--anchor", &handle]);
     assert!(ok);
     let name = out.trim().to_owned();
 
@@ -419,9 +460,9 @@ fn show_at_rev_projects_a_position_binding() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let id = create(path, &["--path", "file.txt", "-L", "3,4"]);
+    let handle = create(path, &["--path", "file.txt", "-L", "3,4"]);
 
-    let (out, err, ok) = run(path, &["inject", "doc", "note", "--anchor", &id]);
+    let (out, err, ok) = run(path, &["inject", "doc", "note", "--anchor", &handle]);
     assert!(ok, "inject failed: {err}");
     let name = out.trim().to_owned();
 
@@ -436,9 +477,12 @@ fn show_at_rev_rejects_a_commit_binding() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (out, _, ok) = run(path, &["inject", "doc", "whole commit", "--anchor", &id]);
+    let (out, _, ok) = run(
+        path,
+        &["inject", "doc", "whole commit", "--anchor", &handle],
+    );
     assert!(ok);
     let name = out.trim().to_owned();
 
@@ -453,9 +497,9 @@ fn show_rejects_reflog_syntax() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/anchors", "doc");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
-    let (out, _, ok) = run(path, &["inject", "doc", "note", "--anchor", &id]);
+    let (out, _, ok) = run(path, &["inject", "doc", "note", "--anchor", &handle]);
     assert!(ok);
     let name = out.trim().to_owned();
 
@@ -478,8 +522,11 @@ fn worktree_inject_and_show_project_uncommitted_content() {
     )
     .unwrap();
 
-    let id = create(path, &["--path", "file.txt", "-L", "5,6", "--worktree"]);
-    let (out, err, ok) = run(path, &["inject", "doc", "worktree note", "--anchor", &id]);
+    let handle = create(path, &["--path", "file.txt", "-L", "5,6", "--worktree"]);
+    let (out, err, ok) = run(
+        path,
+        &["inject", "doc", "worktree note", "--anchor", &handle],
+    );
     assert!(ok, "inject --worktree failed: {err}");
     let name = out.trim().to_owned();
 
@@ -501,7 +548,7 @@ fn prefix_selects_a_disjoint_store() {
     setup(dir.path());
     let path = dir.path();
     publish::<Doc>(path, "refs/example", "doc");
-    let id = create(path, &[]);
+    let handle = create(path, &[]);
 
     let (out, err, ok) = run(
         path,
@@ -512,7 +559,7 @@ fn prefix_selects_a_disjoint_store() {
             "doc",
             "elsewhere",
             "--anchor",
-            &id,
+            &handle,
         ],
     );
     assert!(ok, "inject under a custom prefix failed: {err}");

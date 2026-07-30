@@ -16,7 +16,7 @@
 )]
 
 use facet_git_tree::ObjectStore;
-use gix_anchor::{Binding, LineRange};
+use gix_anchor::{Binding, CaptureHandle, LineRange};
 use gix_object::tree::{Entry, EntryKind, EntryMode};
 use gix_object::{Kind, Tree, Write as _};
 
@@ -180,8 +180,9 @@ fn reconstructing_the_fixture_reproduces_every_recorded_oid() {
 #[test]
 fn the_fixture_deserializes_as_a_position_binding() {
     let (root, store) = build_fixture();
+    let handle = CaptureHandle::from(root);
 
-    let binding = Binding::deserialize(&root, &store).expect("deserialize");
+    let binding = Binding::deserialize(&handle, &store).expect("deserialize");
     let Binding::Position(anchor) = binding else {
         panic!("the fixture must decode as Binding::Position");
     };
@@ -205,9 +206,10 @@ fn the_fixture_deserializes_as_a_position_binding() {
 #[test]
 fn re_encoding_reproduces_the_fixture_root_byte_for_byte() {
     let (root, store) = build_fixture();
-    let binding = Binding::deserialize(&root, &store).expect("deserialize");
+    let handle = CaptureHandle::from(root);
+    let binding = Binding::deserialize(&handle, &store).expect("deserialize");
 
     let fresh = ObjectStore::default();
-    let re_root = binding.serialize_into(&fresh).expect("serialize");
-    assert_eq!(re_root.to_string(), ROOT);
+    let re_handle = binding.serialize_into(&fresh).expect("serialize");
+    assert_eq!(re_handle.to_string(), ROOT);
 }

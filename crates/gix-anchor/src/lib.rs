@@ -105,6 +105,7 @@ mod diff;
 mod error;
 #[cfg(test)]
 mod fixture;
+mod handle;
 mod oid;
 mod projection;
 mod util;
@@ -118,6 +119,7 @@ pub use binding::{
 };
 pub use diff::{TreeChange, diff_trees};
 pub use error::{Error, Result};
+pub use handle::{AnchorId, CaptureHandle};
 pub use oid::Oid;
 pub use projection::{
     Content, PROJECTION_HEURISTIC_VERSION, Position, Projection, project, project_candidates,

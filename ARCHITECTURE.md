@@ -91,7 +91,8 @@ Every future hint field answers to this rule before it ships.
 Content addressing makes the anchor id a pure function of `(genesis_rev, path, span)`.
 Two people anchoring the same span at the same genesis compute the same id and share whatever pins reference it — that is intended, not a collision to guard against.
 Authorship lives in the document that refers to the anchor — its commit's author — never in the anchor identity, which names a location, not a person.
-`git anchor create` reflects this: it is a pure emitter that writes the identity and hints objects and returns the id, advancing no ref.
+`git anchor create` reflects this: it is a pure emitter that writes the identity and hints objects, advancing no ref.
+It returns a capture handle rather than the anchor id itself: a transient, non-identity-bearing locator for the whole serialized binding, needed because hints must be locatable before `inject` embeds them inline — the anchor id is always readable off it via `git anchor id`.
 
 ## `project` is pin-free and threshold-free
 

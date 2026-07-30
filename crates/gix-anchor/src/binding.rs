@@ -21,8 +21,8 @@
 //! witness lives in `hints`.
 //!
 //! `Binding` derives `facet::Facet`, so [`Binding::serialize_into`] and
-//! [`Binding::deserialize`] round-trip it through `facet-git-tree`'s
-//! externally-tagged enum encoding directly.
+//! [`Binding::deserialize`] round-trip it, via a [`crate::CaptureHandle`],
+//! through `facet-git-tree`'s externally-tagged enum encoding directly.
 
 use facet::Facet;
 use gix::ObjectId;
@@ -30,6 +30,7 @@ use gix_object::{Find, Write};
 
 use crate::anchor::Anchor;
 use crate::error::{Error, Result};
+use crate::handle::CaptureHandle;
 use crate::oid::Oid;
 use crate::projection::{Projection, project};
 use crate::util::resolve_commit;
@@ -220,7 +221,9 @@ impl Binding {
     }
 
     /// Write `self` into `store` as an externally-tagged
-    /// [`facet_git_tree`]-encoded tree.
+    /// [`facet_git_tree`]-encoded tree, returning the [`CaptureHandle`] that
+    /// locates it — not itself identity-bearing; read [`CaptureHandle::anchor_id`]
+    /// for the value that is.
     ///
     /// `store` takes the same bound `facet_git_tree::serialize_into` does:
     /// any `gix` object-write sink — a real repository's object database,
@@ -240,8 +243,8 @@ impl Binding {
     ///     },
     ///     hints: NoHints {},
     /// };
-    /// let root = binding.serialize_into(&store).expect("serialize");
-    /// let back = Binding::deserialize(&root, &store).expect("deserialize");
+    /// let handle = binding.serialize_into(&store).expect("serialize");
+    /// let back = Binding::deserialize(&handle, &store).expect("deserialize");
     /// assert_eq!(back, binding);
     /// ```
     ///
@@ -249,26 +252,30 @@ impl Binding {
     ///
     /// [`Error::Serialize`] when the underlying `facet-git-tree` write fails
     /// (a backend error from `store`).
-    pub fn serialize_into<W>(&self, store: &W) -> Result<ObjectId>
+    pub fn serialize_into<W>(&self, store: &W) -> Result<CaptureHandle>
     where
         W: Write + ?Sized,
     {
-        Ok(facet_git_tree::serialize_into(self, store)?)
+        let oid = facet_git_tree::serialize_into(self, store)?;
+        Ok(CaptureHandle::from(oid))
     }
 
-    /// Read the [`Binding`] stored at `id` in `store`.
+    /// Read the [`Binding`] a [`CaptureHandle`] locates in `store`.
     ///
     /// `store` takes the same bound `facet_git_tree::deserialize` does:
     /// any `gix` object-read source.
     ///
     /// # Errors
     ///
-    /// [`Error::Deserialize`] when `id` does not decode as a [`Binding`].
-    pub fn deserialize<F>(id: &ObjectId, store: &F) -> Result<Self>
+    /// [`Error::Deserialize`] when `handle` does not decode as a [`Binding`].
+    pub fn deserialize<F>(handle: &CaptureHandle, store: &F) -> Result<Self>
     where
         F: Find + ?Sized,
     {
-        Ok(facet_git_tree::deserialize(id, store)?)
+        Ok(facet_git_tree::deserialize(
+            &ObjectId::from(*handle),
+            store,
+        )?)
     }
 }
 
@@ -604,8 +611,8 @@ mod tests {
     #[case::hybrid(sample_hybrid())]
     fn every_variant_round_trips_through_serialize_and_deserialize(#[case] binding: Binding) {
         let store = ObjectStore::default();
-        let root = binding.serialize_into(&store).expect("serialize");
-        let back = Binding::deserialize(&root, &store).expect("deserialize");
+        let handle = binding.serialize_into(&store).expect("serialize");
+        let back = Binding::deserialize(&handle, &store).expect("deserialize");
         assert_eq!(back, binding);
     }
 
@@ -613,7 +620,8 @@ mod tests {
     fn deserialize_rejects_a_tree_that_is_not_a_tagged_variant() {
         let store = ObjectStore::default();
         let root = gix_object::Write::write(&store, &gix_object::Tree { entries: vec![] }).unwrap();
-        let error = Binding::deserialize(&root, &store).unwrap_err();
+        let handle = crate::handle::CaptureHandle::from(root);
+        let error = Binding::deserialize(&handle, &store).unwrap_err();
         assert!(matches!(error, Error::Deserialize(_)));
     }
 

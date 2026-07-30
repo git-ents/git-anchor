@@ -5,10 +5,10 @@
 
 use facet::Facet;
 use facet_git_tree::ObjectStore;
-use gix::ObjectId;
 use gix::bstr::ByteSlice as _;
 
 use crate::error::{Error, Result};
+use crate::handle::AnchorId;
 use crate::oid::Oid;
 use crate::util::{lines_of, read_blob, resolve_commit};
 
@@ -145,9 +145,10 @@ impl Anchor {
     /// # Errors
     ///
     /// [`Error::Serialize`] when the underlying `facet-git-tree` write fails.
-    pub fn id(&self) -> Result<ObjectId> {
+    pub fn id(&self) -> Result<AnchorId> {
         let store = ObjectStore::default();
-        Ok(facet_git_tree::serialize_into(&self.identity, &store)?)
+        let oid = facet_git_tree::serialize_into(&self.identity, &store)?;
+        Ok(AnchorId::from(oid))
     }
 }
 
