@@ -516,7 +516,7 @@ dependencies = [
 [[package]]
 name = "facet-git-tree"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#fc79290a4cb52b40a821192435ec0e8516c7b3b4"
+source = "git+https://github.com/git-ents/git-store#30de5e0ff941e976981d24a8ede2e3e6249871d1"
 dependencies = [
  "facet",
  "facet-value",
@@ -1364,7 +1364,7 @@ dependencies = [
 [[package]]
 name = "gix-refstore"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#fc79290a4cb52b40a821192435ec0e8516c7b3b4"
+source = "git+https://github.com/git-ents/git-store#30de5e0ff941e976981d24a8ede2e3e6249871d1"
 dependencies = [
  "gix",
  "gix-hash",
@@ -1434,7 +1434,7 @@ dependencies = [
 [[package]]
 name = "gix-store"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#fc79290a4cb52b40a821192435ec0e8516c7b3b4"
+source = "git+https://github.com/git-ents/git-store#30de5e0ff941e976981d24a8ede2e3e6249871d1"
 dependencies = [
  "facet",
  "facet-git-tree",
