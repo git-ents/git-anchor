@@ -133,16 +133,13 @@ fn a_claim_is_a_plain_commit_stock_git_reads() {
         "anchor"
     );
 
-    // No claim data rides a trailer. Store's own `Schema:` provenance label
-    // is the only trailer present, and it names a schema commit rather than
-    // carrying any part of the claim.
+    // No claim data or store metadata rides a commit trailer.
     let message = git(dir.path(), &["log", "-1", "--format=%B", &reference]);
     let trailers: Vec<_> = message
         .lines()
         .filter(|line| line.contains(": ") && !line.starts_with(' '))
         .collect();
-    assert_eq!(trailers.len(), 1, "{message}");
-    assert!(trailers[0].starts_with("Schema: "), "{message}");
+    assert!(trailers.is_empty(), "{message}");
     assert_eq!(
         git(dir.path(), &["log", "-1", "--format=%s", &reference]).trim(),
         "claim review"
