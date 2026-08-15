@@ -28,11 +28,14 @@
 
 use gix::ObjectId;
 use gix::objs::{Find, Write};
-use gix_store::{Committer, Layout, RefName, RefPath, RefPrefix, RefSegment, RefStore, Store};
+use gix_store::{
+    Committer, DocumentInspection, Expectation, Layout, PublishOptions, RefName, RefPath,
+    RefPrefix, RefSegment, RefStore, Store,
+};
 
 use crate::envelope::{Envelope, Target, target_key};
 use crate::error::Result;
-use crate::schema::claim_segment;
+use crate::schema::{StoredEnvelope, claim_segment};
 
 /// One claim: its id, its envelope, and whether the chain structurally
 /// revokes it.
@@ -146,10 +149,36 @@ where
     pub(crate) fn append(&self, on: &Target, envelope: &Envelope) -> Result<ObjectId> {
         let name = Self::entity_name(on)?;
         let summary = format!("claim {}", envelope.payload_kind);
-        Ok(self
-            .store
-            .kind::<Envelope>(claim_segment())
-            .update(&name, |_current| (summary.clone(), envelope.clone()))?)
+        let kind = self.store.kind::<StoredEnvelope>(claim_segment());
+
+        loop {
+            let current = kind.get_entry(&name)?;
+            let sequence = match current.as_ref() {
+                Some(_) => kind.history(&name)?.len() as u64,
+                None => 0,
+            };
+            let stored = StoredEnvelope::new(envelope.clone(), sequence);
+            let document = kind.compile(&stored)?;
+            let prepared = match self.store.inspect_document(document)? {
+                DocumentInspection::Bound(document) => document,
+                _ => unreachable!("compile produces a bound document"),
+            };
+            let mut options = PublishOptions::new(summary.clone())
+                .with_alias(name.clone())
+                .with_expectation(match current.as_ref() {
+                    Some(entry) => Expectation::Exactly(entry.commit),
+                    None => Expectation::Absent,
+                });
+            if let Some(entry) = current {
+                options = options.with_parent(entry.commit);
+            }
+
+            match kind.publish_prepared(&prepared, options) {
+                Ok(publication) => return Ok(publication.commit()),
+                Err(gix_store::Error::Backend(_)) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     /// The envelope of the claim `claim`, read out of that commit's own tree.
@@ -159,7 +188,11 @@ where
     /// [`Error::Store`] when the commit cannot be read or its envelope
     /// decoded — including when `claim` is not a claim commit at all.
     pub fn envelope_at(&self, claim: ObjectId) -> Result<Envelope> {
-        Ok(self.store.kind::<Envelope>(claim_segment()).get_at(claim)?)
+        Ok(self
+            .store
+            .kind::<StoredEnvelope>(claim_segment())
+            .get_at(claim)?
+            .into_envelope())
     }
 
     /// The store these claims live in.
@@ -183,13 +216,13 @@ where
     /// [`Error::Store`] when a claim commit cannot be read or its envelope
     /// decoded.
     pub fn log(&self, target: &Target) -> Result<impl Iterator<Item = Claim>> {
-        let kind = self.store.kind::<Envelope>(claim_segment());
+        let kind = self.store.kind::<StoredEnvelope>(claim_segment());
         let name = Self::entity_name(target)?;
         let mut claims = Vec::new();
         for id in kind.history(&name)? {
             claims.push(Claim {
                 id,
-                envelope: kind.get_at(id)?,
+                envelope: kind.get_at(id)?.into_envelope(),
                 revoked_by: None,
             });
         }

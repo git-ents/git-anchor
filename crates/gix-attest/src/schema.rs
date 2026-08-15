@@ -15,12 +15,43 @@
 //! anything is published — rather than producing target keys the frozen
 //! mapping cannot reproduce.
 
+use facet::Facet;
 use gix::objs::{Find, Write};
 use gix_store::{Committer, RefSegment, RefStore, Store, schema_of};
 
-use crate::envelope::Envelope;
+use crate::envelope::{Envelope, Target};
 use crate::error::{Error, Result};
 use crate::key::AttestKey;
+
+#[derive(Facet)]
+pub(crate) struct StoredEnvelope {
+    pub(crate) target: Target,
+    pub(crate) payload: crate::Oid,
+    pub(crate) payload_kind: String,
+    pub(crate) key: crate::Oid,
+    pub(crate) sequence: u64,
+}
+
+impl StoredEnvelope {
+    pub(crate) fn new(envelope: Envelope, sequence: u64) -> Self {
+        Self {
+            target: envelope.target,
+            payload: envelope.payload,
+            payload_kind: envelope.payload_kind,
+            key: envelope.key,
+            sequence,
+        }
+    }
+
+    pub(crate) fn into_envelope(self) -> Envelope {
+        Envelope {
+            target: self.target,
+            payload: self.payload,
+            payload_kind: self.payload_kind,
+            key: self.key,
+        }
+    }
+}
 
 /// The kind name an [`Envelope`] schema is published under, and the segment
 /// claim refs are grouped by (`refs/claims/<target-key>`).
@@ -68,7 +99,7 @@ where
     R: RefStore + Committer,
     O: Find + Write,
 {
-    let schema = schema_of::<Envelope>()?;
+    let schema = schema_of::<StoredEnvelope>()?;
     store
         .dynamic(claim_segment())
         .schema()

@@ -28,7 +28,8 @@ use gix_anchor::{
     Binding, CaptureHandle, CommitIdentity, LineRange, NoHints, capture, capture_worktree,
 };
 use gix_store::{
-    DocumentBuilder, Layout, RefPath, RefPrefix, RefSegment, RepoStore, entity_name_under,
+    DeleteResult, DocumentBuilder, Layout, RefPath, RefPrefix, RefSegment, RepoStore,
+    entity_name_under,
 };
 
 #[derive(Parser)]
@@ -341,7 +342,12 @@ fn cmd_remove(store: &RepoStore<'_>, kind: &RefSegment, names: &[RefPath]) -> Re
         }
     }
     for name in names {
-        dynamic.remove(name)?;
+        match dynamic.delete_name(name)? {
+            DeleteResult::Deleted(_) => {}
+            DeleteResult::AlreadyDeleted(_) | DeleteResult::Absent => {
+                bail!("no entity {name} in kind {kind}");
+            }
+        }
     }
     Ok(())
 }
