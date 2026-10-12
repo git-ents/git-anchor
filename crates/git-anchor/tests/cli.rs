@@ -123,12 +123,13 @@ fn setup(path: &Path) {
 /// The `{data, schema}` [`Layout`] `git-anchor` itself derives from a
 /// `--prefix` value — duplicated here (rather than depending on the binary's
 /// internals) since a fixture publisher is exactly the kind of independent
-/// `gix-store` consumer `git anchor` is meant to work with.
+/// `gix-store` consumer `git anchor` is meant to work with. Schemas always
+/// land in the shared `refs/schema` registry, data directly under `prefix`.
 fn layout(prefix: &str) -> Layout {
     let prefix = RefPrefix::new(prefix).unwrap();
     Layout {
-        data: prefix.child(&RefSegment::new("data").unwrap()),
-        schema: prefix.child(&RefSegment::new("schema").unwrap()),
+        data: prefix,
+        schema: RefPrefix::new("refs/schema").unwrap(),
     }
 }
 

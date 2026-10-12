@@ -39,8 +39,11 @@ use gix_store::{
     version
 )]
 struct Cli {
-    /// The store's ref namespace. Defaults to `gix-anchor`'s own; pass any
-    /// other prefix a `gix-store` consumer publishes under.
+    /// The store's data ref namespace. Defaults to `refs/anchors`; pass any
+    /// other prefix a `gix-store` consumer publishes under (e.g.
+    /// `refs/forge` for `git forge` entities). Schemas are always read from
+    /// `refs/schema`, the shared `gix-store` default, so kinds published by
+    /// any consumer are injectable here and vice versa.
     #[arg(long, global = true, default_value = "refs/anchors")]
     prefix: RefPrefix,
     #[command(subcommand)]
@@ -171,9 +174,13 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let repo = gix::discover(".").context("not inside a git repository")?;
+    // Schemas are always read from `refs/schema`, the shared `gix-store`
+    // default -- the one registry every consumer publishes kinds into --
+    // while data lives directly under the data prefix, matching
+    // `git forge`'s `refs/forge` layout.
     let layout = Layout {
-        data: cli.prefix.child(&segment("data")),
-        schema: cli.prefix.child(&segment("schema")),
+        data: cli.prefix,
+        schema: RefPrefix::new("refs/schema").expect("built-in ref prefix is valid"),
     };
     let store = RepoStore::open_with_layout(&repo, layout);
 
@@ -187,10 +194,6 @@ fn main() -> Result<()> {
         Some(Command::Remove(args)) => cmd_remove(&store, &args.kind, &args.names)?,
     }
     Ok(())
-}
-
-fn segment(value: &str) -> RefSegment {
-    RefSegment::new(value).expect("built-in ref segment is valid")
 }
 
 /// Bare `git anchor`: every kind with a published schema, marking which are
@@ -295,6 +298,19 @@ fn cmd_inject(repo: &gix::Repository, store: &RepoStore<'_>, args: InjectArgs) -
         .write(&value)
         .message(message)
         .anonymous_under(&group)?;
+    // Publish the anchor registry ref query's `bind/5` resolves through
+    // (`refs/anchors/<anchor-id>` -> the serialized binding tree), but only
+    // for `Binding::Position`: that is the one shape `anchor/1` can project,
+    // and every other shape would just be registry noise.
+    if matches!(binding, Binding::Position(_)) {
+        let handle = binding.serialize_into(repo)?;
+        repo.reference(
+            format!("refs/anchors/{anchor_id}"),
+            gix::ObjectId::from(handle),
+            gix::refs::transaction::PreviousValue::Any,
+            "anchor inject",
+        )?;
+    }
     println!("{}", entity_name_under(&group, commit));
     Ok(())
 }
@@ -446,6 +462,17 @@ fn resolve<'s>(schema: &'s Schema, node: &'s Node) -> Option<&'s Node> {
     }
 }
 
+/// Whether `node`'s shape structurally equals `binding`'s — directly, or
+/// through an `Optional` wrapper, the shape every forge document embeds its
+/// binding in (`binding: Option<Binding>`).
+fn shape_is_binding(schema: &Schema, node: &Node, binding: &Node) -> bool {
+    match resolve(schema, node) {
+        Some(found) if found == binding => true,
+        Some(Node::Optional(inner)) => resolve(schema, inner) == Some(binding),
+        _ => false,
+    }
+}
+
 /// The one field of `schema`'s root struct whose shape structurally equals
 /// [`Binding`]'s own. Refuses when zero or more than one field matches.
 fn binding_field(schema: &Schema) -> Result<String> {
@@ -455,7 +482,7 @@ fn binding_field(schema: &Schema) -> Result<String> {
     let fields = struct_fields(schema)?;
     let matches: Vec<&String> = fields
         .iter()
-        .filter(|(_, field)| resolve(schema, &field.node) == Some(canonical_root))
+        .filter(|(_, field)| shape_is_binding(schema, &field.node, canonical_root))
         .map(|(name, _)| name)
         .collect();
     match matches.as_slice() {

@@ -67,7 +67,9 @@ git anchor show <kind> <name> [--json]                # one entity by its full n
 git anchor remove <kind> <name>...  (alias: rm)       # delete one or more entities, all checked to exist before any is removed
 ```
 
-`--prefix <PREFIX>` (default `refs/anchors`) is a global option selecting the store's ref namespace — pass whatever prefix a `gix-store` consumer publishes under.
+`--prefix <PREFIX>` (default `refs/anchors`) is a global option selecting the store's data ref namespace — entities land directly under it (e.g. `refs/forge/<kind>/…` for `git forge`'s store).
+Schemas always come from `refs/schema`, the shared `gix-store` default, so a kind published by any `gix-store` consumer is injectable here and vice versa.
+`inject` also publishes `refs/anchors/<anchor-id>` — the registry `git query`'s `bind/5` resolves through — for `Binding::Position` bindings.
 `<name>` is an entity's full name, `<anchor-id-hex>/<id-hex>`, exactly as `inject`/`list` printed it.
 
 `inject`'s one remaining rule, beyond the binding field: among the kind's other required fields, exactly one whose shape is `Node::String` is filled from `<text>`; zero or more than one refuses with an error naming the candidates.
