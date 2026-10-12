@@ -307,7 +307,7 @@ mod tests {
         reason = "unit test; the panic is an assertion the type reflects as a struct at all"
     )]
 
-    use facet::{Facet as _, Type, UserType};
+    use facet::{Type, UserType};
     use gix::ObjectId;
     use rstest::rstest;
 

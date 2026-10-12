@@ -303,7 +303,7 @@ fn cmd_inject(repo: &gix::Repository, store: &RepoStore<'_>, args: InjectArgs) -
 fn cmd_list(store: &RepoStore<'_>, kind: &RefSegment, json: bool) -> Result<()> {
     let dynamic = store.dynamic(kind.clone());
     for name in dynamic.list()? {
-        let Some(value) = dynamic.get(&name)? else {
+        let Some(value) = dynamic.read(&name)?.value() else {
             continue;
         };
         if json {
@@ -327,7 +327,8 @@ fn cmd_show(store: &RepoStore<'_>, args: ShowArgs) -> Result<()> {
 
     let dynamic = store.dynamic(kind.clone());
     let value = dynamic
-        .get(&name)?
+        .read(&name)?
+        .value()
         .ok_or_else(|| anyhow!("no entity {name} in kind {kind}"))?;
     print_value(&name, &value, json)
 }
@@ -337,7 +338,7 @@ fn cmd_show(store: &RepoStore<'_>, args: ShowArgs) -> Result<()> {
 fn cmd_remove(store: &RepoStore<'_>, kind: &RefSegment, names: &[RefPath]) -> Result<()> {
     let dynamic = store.dynamic(kind.clone());
     for name in names {
-        if dynamic.get(name)?.is_none() {
+        if dynamic.read(name)?.value().is_none() {
             bail!("no entity {name} in kind {kind}");
         }
     }

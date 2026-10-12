@@ -34,6 +34,7 @@ use gix_store::{
 };
 
 use crate::envelope::{Envelope, Target, target_key};
+use crate::error::Error;
 use crate::error::Result;
 use crate::schema::{StoredEnvelope, claim_segment};
 
@@ -152,14 +153,14 @@ where
         let kind = self.store.kind::<StoredEnvelope>(claim_segment());
 
         loop {
-            let current = kind.get_entry(&name)?;
+            let current = kind.read(&name)?.present();
             let sequence = match current.as_ref() {
                 Some(_) => kind.history(&name)?.len() as u64,
                 None => 0,
             };
             let stored = StoredEnvelope::new(envelope.clone(), sequence);
             let document = kind.compile(&stored)?;
-            let prepared = match self.store.inspect_document(document)? {
+            let prepared = match self.store.inspect_document(document.into())? {
                 DocumentInspection::Bound(document) => document,
                 _ => unreachable!("compile produces a bound document"),
             };
@@ -191,7 +192,10 @@ where
         Ok(self
             .store
             .kind::<StoredEnvelope>(claim_segment())
-            .get_at(claim)?
+            .read(claim)?
+            .present()
+            .ok_or(Error::MissingClaim { claim })?
+            .value
             .into_envelope())
     }
 
@@ -222,7 +226,12 @@ where
         for id in kind.history(&name)? {
             claims.push(Claim {
                 id,
-                envelope: kind.get_at(id)?.into_envelope(),
+                envelope: kind
+                    .read(id)?
+                    .present()
+                    .ok_or(Error::MissingClaim { claim: id })?
+                    .value
+                    .into_envelope(),
                 revoked_by: None,
             });
         }

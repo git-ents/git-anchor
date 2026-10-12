@@ -61,7 +61,10 @@ fn hints_never_embed_a_gitlink() {
 
     let store = ObjectStore::default();
     let root = serialize_into(&anchor, &store).expect("serialize");
-    let top = store.get_tree(&root).expect("anchor tree");
+    let top = store
+        .get_tree(&root)
+        .expect("anchor tree")
+        .expect("anchor tree present");
     let hints_oid = top
         .iter()
         .find(|e| e.filename == "hints")
@@ -70,7 +73,7 @@ fn hints_never_embed_a_gitlink() {
 
     let mut stack = vec![hints_oid];
     while let Some(tree) = stack.pop() {
-        for entry in store.get_tree(&tree).expect("tree") {
+        for entry in store.get_tree(&tree).expect("tree").expect("tree present") {
             assert_ne!(
                 entry.mode.kind(),
                 EntryKind::Commit,
@@ -99,6 +102,7 @@ fn hints_are_reachable_from_the_storing_documents_tree() {
     let hints_tree = store
         .get_tree(&anchor_tree)
         .expect("anchor tree")
+        .expect("anchor tree present")
         .into_iter()
         .find(|entry| entry.filename == "hints")
         .expect("hints entry")
@@ -113,7 +117,7 @@ fn hints_are_reachable_from_the_storing_documents_tree() {
     let mut stack = vec![root];
     let mut found = false;
     while let Some(tree) = stack.pop() {
-        for entry in store.get_tree(&tree).expect("tree") {
+        for entry in store.get_tree(&tree).expect("tree").expect("tree present") {
             if entry.oid == hints_tree {
                 found = true;
             }
