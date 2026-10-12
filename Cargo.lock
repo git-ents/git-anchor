@@ -1262,7 +1262,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c91d8cffac8849493a82233811bd02b2b183b8cf39bf704de0fa0841b737595"
 dependencies = [
  "bstr",
- "hashbrown 0.16.1",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -1471,7 +1471,7 @@ dependencies = [
 [[package]]
 name = "gix-refstore"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#d9f751ddc160959e764de4e16e88b132e2379aab"
+source = "git+https://github.com/git-ents/git-store#19c449371fc0b1c8d4acca3255cb7232960f3915"
 dependencies = [
  "gix",
  "gix-hash",
@@ -1541,7 +1541,7 @@ dependencies = [
 [[package]]
 name = "gix-store"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#d9f751ddc160959e764de4e16e88b132e2379aab"
+source = "git+https://github.com/git-ents/git-store#19c449371fc0b1c8d4acca3255cb7232960f3915"
 dependencies = [
  "facet",
  "facet-git-tree",
