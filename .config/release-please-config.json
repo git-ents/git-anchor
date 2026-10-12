@@ -5,10 +5,11 @@
   "include-component-in-tag": true,
   "include-v-in-tag": true,
   "release-type": "rust",
-  "initial-version": "0.0.1",
+  "initial-version": "0.0.0-alpha.1",
   "draft-pull-request": true,
   "pull-request-footer": "This release was generated with [Release Please](https://github.com/googleapis/release-please).",
   "changelog-sections": [
+    { "type": "deps", "section": "Dependencies" },
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug Fixes" },
     { "type": "perf", "section": "Performance Improvements" },
@@ -17,7 +18,12 @@
     { "type": "refactor", "section": "Code Refactoring" },
     { "type": "test", "section": "Tests" }
   ],
-  "packages": {},
+  "packages": {
+    "crates/gix-anchor": {},
+    "crates/gix-attest": {},
+    "crates/git-anchor": {},
+    "crates/git-attest": {}
+  },
   "plugins": [{ "type": "sentence-case" }],
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"
 }

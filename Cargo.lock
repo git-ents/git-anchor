@@ -878,7 +878,7 @@ dependencies = [
 
 [[package]]
 name = "git-anchor"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "git-attest"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -975,7 +975,7 @@ dependencies = [
 
 [[package]]
 name = "gix-anchor"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "facet",
  "facet-git-tree",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "gix-attest"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "facet",
  "facet-git-tree",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "test-support"
-version = "0.1.0"
+version = "0.0.0"
 dependencies = [
  "gix",
 ]
