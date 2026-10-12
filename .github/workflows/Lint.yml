@@ -74,12 +74,17 @@ jobs:
           pre-commit install-hooks -c .config/pre-commit.yaml
 
       - name: Create commit message from PR
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          cat > /tmp/commit-msg.txt << 'EOF'
-          ${{ github.event.pull_request.title }}
-
-          ${{ github.event.pull_request.body }}
-          EOF
+          title="$PR_TITLE"
+          # Release Please generates chore(main): release ... titles; normalize
+          # that generated scope so it follows the repository's scope-free format.
+          if [[ "$title" =~ ^chore\(main\):[[:space:]]release([[:space:]]|$) ]]; then
+            title="${title/chore(main): /chore: }"
+          fi
+          printf '%s\n\n%s\n' "$title" "$PR_BODY" > /tmp/commit-msg.txt
           echo "--- Commit message to validate ---"
           cat /tmp/commit-msg.txt
           echo "--- End of commit message ---"
@@ -112,9 +117,9 @@ jobs:
       - name: Run cargo-deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          arguments: --all-features
+          arguments: --all-features --config .config/deny.toml
           command: check
-          command-arguments: ${{ matrix.checks }} -c .config/deny.toml
+          command-arguments: ${{ matrix.checks }}
 
   semver-checks:
     name: Semver checks

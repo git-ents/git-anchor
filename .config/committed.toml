@@ -16,10 +16,7 @@ allowed_types = [
     "perf",
     "test",
     "release",
-]
-allowed_scopes = [
-    "checks",
-    "release",
+    "deps",
 ]
 merge_commit = false
 no_fixup = false
