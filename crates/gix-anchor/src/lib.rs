@@ -115,7 +115,9 @@ pub use binding::{
 };
 pub use diff::{TreeChange, diff_trees};
 pub use error::{Error, Result};
-pub use fingerprint::{Fingerprint, MINHASH_SHINGLE_V1, Param, minhash_shingle};
+pub use fingerprint::{
+    Fingerprint, MINHASH_SHINGLE_V1, MINHASH_SHINGLE_V2, Param, minhash_shingle,
+};
 pub use handle::{AnchorId, CaptureHandle};
 pub use oid::Oid;
 pub use oracle::{

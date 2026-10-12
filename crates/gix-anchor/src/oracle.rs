@@ -27,7 +27,9 @@ use gix::diff::tree_with_rewrites::Change;
 
 use crate::anchor::{Anchor, Span};
 use crate::error::{Error, Result};
-use crate::fingerprint::capture_fingerprint;
+use crate::fingerprint::{
+    MINHASH_SHINGLE_V1, MINHASH_SHINGLE_V2, capture_fingerprint, fingerprint_for,
+};
 use crate::handle::AnchorId;
 use crate::util::{commit_at, line_boundaries, read_blob, resolve_commit};
 
@@ -275,10 +277,16 @@ pub fn fingerprint(
     anchor: &Anchor,
     target: &str,
 ) -> Result<Vec<Candidate>> {
-    let reference = match anchor.hints.fingerprints.first() {
-        Some(fingerprint) => fingerprint.value.clone(),
+    let fingerprint = anchor.hints.fingerprints.iter().find(|fingerprint| {
+        matches!(
+            fingerprint.algo.as_str(),
+            MINHASH_SHINGLE_V1 | MINHASH_SHINGLE_V2
+        )
+    });
+    let (algo, reference) = match fingerprint {
+        Some(fingerprint) => (fingerprint.algo.as_str(), fingerprint.value.clone()),
         None => match recompute_reference(repo, anchor)? {
-            Some(value) => value,
+            Some(value) => (MINHASH_SHINGLE_V2, value),
             None => return Ok(Vec::new()),
         },
     };
@@ -319,7 +327,10 @@ pub fn fingerprint(
         let Some(window) = data.get(start_usize..end_usize) else {
             continue;
         };
-        let score = minhash_similarity(&capture_fingerprint(window).value, &reference);
+        let Some(candidate_fingerprint) = fingerprint_for(algo, window) else {
+            continue;
+        };
+        let score = minhash_similarity(&candidate_fingerprint, &reference);
         if score > 0.0 {
             candidates.push(Candidate {
                 oracle: Oracle::Fingerprint,
@@ -519,6 +530,36 @@ mod tests {
                 .into();
 
         assert_eq!(diff_trace(&git_repo, &anchor, "HEAD").unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn fingerprint_recovers_a_small_region_after_an_interior_insert() {
+        let dir = repo();
+        std::fs::write(
+            dir.path().join("file.txt"),
+            "line one\nline two\nline three\n",
+        )
+        .unwrap();
+        commit_all(dir.path(), "one");
+        let initial = gix::open(dir.path()).unwrap();
+        let anchor = capture(&initial, "HEAD", "file.txt", range(2, 3)).unwrap();
+
+        std::fs::write(
+            dir.path().join("file.txt"),
+            "line one\nline two\ninserted\nline three\n",
+        )
+        .unwrap();
+        commit_all(dir.path(), "insert");
+        let current = gix::open(dir.path()).unwrap();
+        assert!(diff_trace(&current, &anchor, "HEAD").unwrap().is_empty());
+
+        let candidates = fingerprint(&current, &anchor, "HEAD").unwrap();
+        assert!(!candidates.is_empty());
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.confidence > 0.0)
+        );
     }
 
     #[test]

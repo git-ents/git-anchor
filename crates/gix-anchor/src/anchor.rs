@@ -124,7 +124,7 @@ pub struct AnchorHints {
     /// [`crate::oracle::fingerprint`] oracle to match against once exact
     /// history tracing fails. [`crate::capture`] and
     /// [`crate::capture_worktree`] each emit exactly one,
-    /// [`crate::fingerprint::MINHASH_SHINGLE_V1`]; an absent or stale
+    /// [`crate::fingerprint::MINHASH_SHINGLE_V2`]; an absent or stale
     /// fingerprint is recomputed on demand from `identity`, never trusted
     /// blindly.
     pub fingerprints: Vec<Fingerprint>,
