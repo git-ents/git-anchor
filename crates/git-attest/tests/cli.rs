@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use facet::Facet;
-use gix_attest::{Target, target_key};
+use git_attest::{Target, target_key};
 use gix_store::{Layout, RefPrefix, RefSegment, RepoStore};
 use test_support::init_repo;
 

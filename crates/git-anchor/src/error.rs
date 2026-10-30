@@ -1,4 +1,4 @@
-//! The error type every `gix-anchor` operation returns.
+//! The error type every `git-anchor` operation returns.
 
 use gix::ObjectId;
 
@@ -67,5 +67,5 @@ pub enum Error {
     SchemaRegistration(String),
 }
 
-/// The `Result` alias every `gix-anchor` operation returns.
+/// The `Result` alias every `git-anchor` operation returns.
 pub type Result<T> = std::result::Result<T, Error>;

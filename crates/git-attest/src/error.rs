@@ -1,4 +1,4 @@
-//! The error type every `gix-attest` operation returns.
+//! The error type every `git-attest` operation returns.
 
 /// Everything that can go wrong writing or reading a claim.
 ///
@@ -78,5 +78,5 @@ pub enum Error {
     },
 }
 
-/// The `Result` alias every `gix-attest` operation returns.
+/// The `Result` alias every `git-attest` operation returns.
 pub type Result<T> = std::result::Result<T, Error>;

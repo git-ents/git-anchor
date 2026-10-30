@@ -155,7 +155,7 @@ pub struct DeltaHints {
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::{Binding, CommitIdentity, NoHints};
+/// use git_anchor::{Binding, CommitIdentity, NoHints};
 ///
 /// let commit = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
 /// let binding = Binding::Commit {
@@ -215,7 +215,7 @@ impl Binding {
     /// # Examples
     ///
     /// ```
-    /// use gix_anchor::{Binding, DeltaHints, DeltaIdentity};
+    /// use git_anchor::{Binding, DeltaHints, DeltaIdentity};
     ///
     /// let base_witness = gix::ObjectId::from_hex(b"1111111111111111111111111111111111111111").unwrap();
     /// let head_witness = gix::ObjectId::from_hex(b"2222222222222222222222222222222222222222").unwrap();
@@ -253,7 +253,7 @@ impl Binding {
     /// # Examples
     ///
     /// ```
-    /// use gix_anchor::{Binding, CommitIdentity, NoHints};
+    /// use git_anchor::{Binding, CommitIdentity, NoHints};
     ///
     /// let commit = gix::ObjectId::from_hex(b"0123456789abcdef0123456789abcdef01234567").unwrap();
     /// let binding = Binding::Commit {
@@ -289,7 +289,7 @@ impl Binding {
     /// # Examples
     ///
     /// ```
-    /// use gix_anchor::{Binding, CommitIdentity, NoHints};
+    /// use git_anchor::{Binding, CommitIdentity, NoHints};
     /// use facet_git_tree::ObjectStore;
     ///
     /// let store = ObjectStore::default();
@@ -341,7 +341,7 @@ impl Binding {
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::Validity;
+/// use git_anchor::Validity;
 ///
 /// assert_ne!(Validity::Valid, Validity::Stale);
 /// ```
@@ -366,7 +366,7 @@ pub enum Validity {
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::EvalState;
+/// use git_anchor::EvalState;
 ///
 /// let state = EvalState { at: "HEAD", delta: None };
 /// assert_eq!(state.at, "HEAD");
@@ -399,7 +399,7 @@ pub struct EvalState<'a> {
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::{Binding, CommitIdentity, EvalState, NoHints, Validity};
+/// use git_anchor::{Binding, CommitIdentity, EvalState, NoHints, Validity};
 ///
 /// # let dir = tempfile::tempdir().expect("tempdir");
 /// # std::process::Command::new("git").arg("init").arg("-q").arg(dir.path()).status().unwrap();
@@ -415,7 +415,7 @@ pub struct EvalState<'a> {
 ///     hints: NoHints {},
 /// };
 /// let state = EvalState { at: "HEAD", delta: None };
-/// assert_eq!(gix_anchor::revalidate(&repo, &binding, &state).unwrap(), Validity::Valid);
+/// assert_eq!(git_anchor::revalidate(&repo, &binding, &state).unwrap(), Validity::Valid);
 /// ```
 pub fn revalidate(
     repo: &gix::Repository,

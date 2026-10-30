@@ -1,4 +1,4 @@
-//! The differential fixture: a claim written by `gix-attest` is an ordinary
+//! The differential fixture: a claim written by `git-attest` is an ordinary
 //! git commit, readable by stock `git cat-file` with no tooling of ours
 //! installed — plain commits, plain trees, and no claim data hidden in
 //! trailers.
@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use gix_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
+use git_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
 use gix_refstore::{SignatureBytes, Signer};
 use gix_store::{GixRefStore, Store};
 

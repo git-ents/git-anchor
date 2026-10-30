@@ -15,8 +15,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use gix_attest::verify::signed_payload;
-use gix_attest::{AttestKey, Claim, Claims, Envelope, Target, Verdict, layout, register_schemas};
+use git_attest::verify::signed_payload;
+use git_attest::{AttestKey, Claim, Claims, Envelope, Target, Verdict, layout, register_schemas};
 use gix_refstore::{SignatureBytes, Signer};
 use gix_store::{GixRefStore, Store};
 

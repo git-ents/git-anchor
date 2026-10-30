@@ -1,5 +1,5 @@
 //! `git-attest`: a git external subcommand (`git attest …`) over
-//! [`gix_attest`]'s claim chains — five subcommands, exactly the five
+//! [`git-attest`]'s claim chains — five subcommands, exactly the five
 //! `ARCHITECTURE.md` names:
 //!
 //! ```text
@@ -47,11 +47,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use facet_git_tree::{Node, Schema};
 use facet_value::{VObject, Value};
-use gix::ObjectId;
-use gix_attest::{
+use git_attest::{
     AttestKey, Claim, Claims, Envelope, KEY_KIND, KEY_TARGET_KIND, Target, Verdict,
     register_schemas,
 };
+use gix::ObjectId;
 use gix_store::{DocumentBuilder, Layout, RefPrefix, RefSegment, RepoStore};
 
 use crate::signer::SigningKey;
@@ -437,7 +437,7 @@ fn key_claim(
 fn ensure_schemas(store: &RepoStore<'_>) -> Result<()> {
     let kinds = store.kinds()?;
     let has = |kind: &str| kinds.iter().any(|name| name.as_str() == kind);
-    if !has(gix_attest::CLAIM_KIND) || !has(KEY_KIND) {
+    if !has(git_attest::CLAIM_KIND) || !has(KEY_KIND) {
         register_schemas(store)?;
     }
     Ok(())

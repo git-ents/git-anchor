@@ -1,6 +1,6 @@
 # git-attest
 
-`git attest` — sign, revoke, and read claims: signed envelopes chained on claim refs, over [`gix-attest`](../gix-attest).
+`git attest` — sign, revoke, and read claims: signed envelopes chained on claim refs, over the library this crate carries (the CLI sits behind the crate's default-on `cli` feature).
 
 ```text
 git attest sign    <target> <payload-tree> --kind <payload-kind>

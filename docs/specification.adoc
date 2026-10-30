@@ -5,7 +5,7 @@ Joey Carpinelli <joseph.carpinelli@icloud.com>
 ****
 An anchor is a durable pointer into source: a genesis commit, a repository-relative path, and a byte span over the blob's stored bytes.
 Anchors resolve independently of any consumer — reviews, TODO trackers, and blame overlays all reuse the same mechanism, via three named oracles that report candidates at a confidence, never a threshold.
-This document defines the invariants the `gix-anchor` library upholds; they will be upheld (and expanded) while the project is developed.
+This document defines the invariants the `git-anchor` library upholds; they will be upheld (and expanded) while the project is developed.
 ****
 
 == Requirements

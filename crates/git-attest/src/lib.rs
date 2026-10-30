@@ -19,7 +19,7 @@
 //! | enforcement (which namespaces require signatures) | boundary hooks and policy — absent here |
 //!
 //! Sibling crates in this workspace are not siblings in the dependency graph:
-//! `gix-anchor` and `gix-attest` do not depend on each other in either
+//! `git-anchor` and `git-attest` do not depend on each other in either
 //! direction, and CI proves it over `cargo metadata`. `"anchor"` occurs in
 //! this crate only as an uninterpreted [`Target::kind`] label in tests.
 //!
@@ -46,16 +46,16 @@
 //! Sign two claims about one target and walk the chain:
 //!
 //! ```
-//! use gix_attest::{Claims, Envelope, Target, register_schemas};
+//! use git_attest::{Claims, Envelope, Target, register_schemas};
 //! use gix_store::{MemoryRefStore, Store};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Any `gix-store` store will do; a real repository's is the usual one.
-//! // `gix_attest::layout()` is what puts claim refs at `refs/claims/<target-key>`.
+//! // `git_attest::layout()` is what puts claim refs at `refs/claims/<target-key>`.
 //! let store = Store::with_layout(
 //!     MemoryRefStore::new(),
 //!     facet_git_tree::ObjectStore::default(),
-//!     gix_attest::layout(),
+//!     git_attest::layout(),
 //! );
 //! register_schemas(&store)?;
 //!
@@ -81,7 +81,7 @@
 //! assert_eq!(ids, vec![second, first]);
 //! assert_eq!(
 //!     claims.reference(&target)?.as_str(),
-//!     format!("refs/claims/{}", gix_attest::target_key(&target)?),
+//!     format!("refs/claims/{}", git_attest::target_key(&target)?),
 //! );
 //! # Ok(())
 //! # }

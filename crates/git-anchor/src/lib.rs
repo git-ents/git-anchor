@@ -37,7 +37,7 @@
 //! onto a later commit with [`diff_trace`]:
 //!
 //! ```
-//! use gix_anchor::{Anchor, LineRange};
+//! use git_anchor::{Anchor, LineRange};
 //! use facet_git_tree::RawTree;
 //!
 //! // Stands in for a downstream consumer's `Comment` (this crate cannot
@@ -61,7 +61,7 @@
 //!
 //! // Capture against HEAD: the line range is a capture-time input,
 //! // canonicalized to a byte span before it ever reaches `identity`.
-//! let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", Some(LineRange { start: 3, end: 4 }))
+//! let anchor = git_anchor::capture(&repo, "HEAD", "file.txt", Some(LineRange { start: 3, end: 4 }))
 //!     .expect("capture");
 //!
 //! // The anchor serializes into the same store the comment does; the
@@ -86,7 +86,7 @@
 //! # git(dir.path(), &["add", "-A"]);
 //! # git(dir.path(), &["commit", "-q", "-m", "two"]);
 //! let repo = gix::open(dir.path()).expect("reopen");
-//! let candidates = gix_anchor::diff_trace(&repo, &anchor_back, "HEAD").expect("diff_trace");
+//! let candidates = git_anchor::diff_trace(&repo, &anchor_back, "HEAD").expect("diff_trace");
 //! assert_eq!(candidates.len(), 1);
 //! assert_eq!(candidates[0].path, "file.txt");
 //! assert_eq!(candidates[0].confidence, 1.0);

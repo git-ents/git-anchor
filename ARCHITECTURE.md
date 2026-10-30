@@ -4,7 +4,7 @@ Typed documents as Git trees.
 Derivation and authority are kept strictly separate.
 
 Six products.
-Library crates are `gix-*`, binaries are `git-*`.
+Each is a crate carrying both its library and, behind a default-on `cli` feature, its `git <name>` external-subcommand binary.
 
 | product | adds | depends on |
 |---|---|---|
@@ -163,7 +163,7 @@ No identity change; safe to defer.
 `git anchor create` is a pure emitter: computes identity + capture-time hints, writes objects at most, advances nothing.
 The distinguishing CLI capability is binding capture and injection; generic document writing is store's dynamic write path.
 
-Oracles (`gix-anchor`), pure functions of `(objects, Binding, params)`:
+Oracles (`git-anchor`), pure functions of `(objects, Binding, params)`:
 
 | oracle | mechanism | notes |
 |---|---|---|
@@ -232,7 +232,7 @@ No negation: candidate generation is monotone, so semi-naive incrementality hold
 
 ```text
 cand(A, Rev, Loc, pin, 1.0) :- pin_claim(A, Rev, Loc).
-cand(A, Rev, Loc, O, C)     :- project(A, Rev, Loc, O, C).   # oracle chain from gix-anchor
+cand(A, Rev, Loc, O, C)     :- project(A, Rev, Loc, O, C).   # oracle chain from git-anchor
 
 bind(A, Rev, Loc, O, C)     :- cand(A, Rev, Loc, O, C),
                                C = max{ C' : cand(A, Rev, _, _, C') }.   # aggregation stratum

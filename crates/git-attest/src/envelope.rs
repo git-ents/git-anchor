@@ -39,7 +39,7 @@ use crate::oid::Oid;
 /// # Examples
 ///
 /// ```
-/// use gix_attest::{Target, target_key};
+/// use git_attest::{Target, target_key};
 ///
 /// let id = gix::ObjectId::from_hex(b"7f3e000000000000000000000000000000000000").unwrap();
 /// let target = Target { kind: "anchor".to_owned(), id: id.into() };

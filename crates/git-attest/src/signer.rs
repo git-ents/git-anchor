@@ -1,10 +1,10 @@
 //! The CLI's signing path: `ssh-keygen -Y sign -n git`, and nothing else.
 //!
-//! `gix-attest` contains no signing code — signing is `gix-store`'s
+//! `git-attest` contains no signing code — signing is `gix-store`'s
 //! [`Signer`](gix_store::Signer) seam, and the *choice* of signer is a user
 //! interface concern, so it lives here. What this module produces is the
 //! armored SSHSIG block `ssh-keygen -Y sign` writes, verbatim: exactly what the
-//! `gpgsig` transport stores, what `gix_attest::verify::SshEd25519` checks, and
+//! `gpgsig` transport stores, what `git_attest::verify::SshEd25519` checks, and
 //! what stock `git verify-commit` accepts.
 //!
 //! No ssh-agent is involved: the private key file is read by `ssh-keygen`
@@ -128,7 +128,7 @@ impl Signer for SshKeygen {
 
     fn sign(&self, bytes: &[u8]) -> Result<SignatureBytes, Self::Error> {
         // `-n git` is git's own SSHSIG namespace — the one
-        // `gix_attest::verify` and `git verify-commit` both require — and the
+        // `git_attest::verify` and `git verify-commit` both require — and the
         // payload goes over stdin so the signed bytes never touch disk.
         let mut child = Command::new("ssh-keygen")
             .args(["-Y", "sign", "-q", "-n", "git", "-f"])

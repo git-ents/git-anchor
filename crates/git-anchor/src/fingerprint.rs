@@ -109,7 +109,7 @@ pub(crate) fn fingerprint_for(algo: &str, bytes: &[u8]) -> Option<Vec<u8>> {
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::minhash_shingle;
+/// use git_anchor::minhash_shingle;
 ///
 /// let a = minhash_shingle(b"the quick brown fox", 8, 16);
 /// let b = minhash_shingle(b"the quick brown fox", 8, 16);

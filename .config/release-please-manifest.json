@@ -1,6 +1,4 @@
 {
-  "crates/gix-anchor": "0.0.0",
-  "crates/gix-attest": "0.0.0",
   "crates/git-anchor": "0.0.0",
   "crates/git-attest": "0.0.0"
 }

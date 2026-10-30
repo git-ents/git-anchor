@@ -24,7 +24,7 @@ use crate::util::{byte_span_of, read_blob, resolve_commit};
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::LineRange;
+/// use git_anchor::LineRange;
 ///
 /// let range = LineRange { start: 3, end: 4 };
 /// assert_eq!(range.end - range.start + 1, 2, "two lines, inclusive");
@@ -45,7 +45,7 @@ pub struct LineRange {
 /// # Examples
 ///
 /// ```
-/// use gix_anchor::Span;
+/// use git_anchor::Span;
 ///
 /// let span = Span { start: 10, end: 20 };
 /// assert_eq!(span.end - span.start, 10);
@@ -198,7 +198,7 @@ impl Anchor {
 /// #     .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "one"])
 /// #     .status().unwrap();
 /// let repo = gix::open(dir.path()).expect("open");
-/// let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).expect("capture");
+/// let anchor = git_anchor::capture(&repo, "HEAD", "file.txt", None).expect("capture");
 /// assert_eq!(anchor.identity.path, "file.txt");
 /// ```
 pub fn capture(

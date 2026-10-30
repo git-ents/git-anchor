@@ -3,7 +3,7 @@
 //! `gix-store` registry — it defines no document type of its own.
 //!
 //! `inject <kind>` requires `<kind>`'s published schema to embed
-//! [`gix_anchor::Binding`]'s shape (located by structural comparison, not by
+//! [`git_anchor::Binding`]'s shape (located by structural comparison, not by
 //! name): that field is always filled from a previously [`create`](Command::Create)d
 //! binding, never from user text. `list`/`show`/`remove` work the same way
 //! for any kind, published schema or not, read back as [`facet_value::Value`]
@@ -24,7 +24,7 @@ use facet_git_tree::{
     Node, ObjectStore, Schema, StructField, deserialize_value_with_schema, schema_of,
 };
 use facet_value::{VObject, Value};
-use gix_anchor::{
+use git_anchor::{
     Binding, CaptureHandle, CommitIdentity, LineRange, NoHints, capture, capture_worktree,
 };
 use gix_store::{

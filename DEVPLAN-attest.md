@@ -1,17 +1,17 @@
 # git-attest — dev plan
 
 Implement `ARCHITECTURE.md`'s git-attest: signed claim envelopes and chains.
-Two crates in this repo's workspace — **`gix-attest`** (library) and **`git-attest`** (CLI, invoked as `git attest`) — added to `crates/` beside `gix-anchor`/`git-anchor`, exactly as git-effect lives in git-query's repo.
+One crate in this repo's workspace — **`git-attest`**, a library and the `git attest` CLI it carries behind a default-on `cli` feature — added to `crates/` beside `git-anchor`, exactly as git-effect lives in git-query's repo.
 
 Template: `../git-query/DEVPLAN.md` for the document, this repo and `../git-store` for conventions, configs, and workflows.
-Naming, non-negotiable: `gix-attest` library, `git-attest` binary, subcommands `sign`, `revoke`, `verify`, `log`, `resolve` — nothing else.
+Naming, non-negotiable: `git-attest` — library and `git attest` binary in one crate, the binary behind the default-on `cli` feature — with subcommands `sign`, `revoke`, `verify`, `log`, `resolve` and nothing else.
 
 **Colocation is not coupling.**
 `ARCHITECTURE.md`: "anchor and attest are siblings.
 Neither knows the other exists."
-Sharing this workspace changes nothing: `gix-attest` must not depend on `gix-anchor` and `gix-anchor` must not depend on `gix-attest`, ever, and a CI check over `cargo metadata` enforces it the day the crate lands.
+Sharing this workspace changes nothing: `git-attest` must not depend on `git-anchor` and `git-anchor` must not depend on `git-attest`, ever, and a CI check over `cargo metadata` enforces it the day the crate lands.
 The only composition point is git-query, which reads both.
-The repo split (DELTA X1 imagined `../git-attest`) can happen later by moving two directories; nothing in this plan makes that harder.
+The repo split (DELTA X1 imagined `../git-attest`) can happen later by moving one directory; nothing in this plan makes that harder.
 
 **What is actually being built, stated once:** a claim is a chained commit on a claim ref.
 The envelope — target descriptor, payload tree hash, signing-key id — is a store typed doc; the signature bytes ride the claim commit in the standard `gpgsig` header, so `git log --show-signature` verifies claims with stock git; verification is cryptography and nothing else.
@@ -97,8 +97,8 @@ Revocation and key add/rotate are the only claim kinds attest understands, becau
 - **key add / rotate**: claims whose payloads are key docs — an attest-owned store schema (`AttestKey { format: String, public_key: Bytes, ... }`), the one payload schema attest registers, because key material is envelope machinery.
   `Envelope.key` points at the key-add claim; rotation chains on the key's own claim ref.
 
-Everything else — rebind pins (anchor's schema, already registered by `gix-anchor/src/pin.rs`), action records, review assertions — is an opaque payload.
-If a function in `gix-attest` ever matches on a payload kind other than its own two, that is the abstraction leaking.
+Everything else — rebind pins (anchor's schema, already registered by `git-anchor/src/pin.rs`), action records, review assertions — is an opaque payload.
+If a function in `git-attest` ever matches on a payload kind other than its own two, that is the abstraction leaking.
 
 ### 5. `verify` is crypto only; validity never enters this repo
 
@@ -106,7 +106,7 @@ If a function in `gix-attest` ever matches on a payload kind other than its own 
 That is the entire function.
 
 `key_valid_at` — was the key valid at the op-log position where the claim was admitted — is a query predicate over op-log order, and retroactivity of key revocation is rule policy.
-Neither belongs here, and `gix-attest` exposes nothing that would let a caller confuse "cryptographically sound" with "valid."
+Neither belongs here, and `git-attest` exposes nothing that would let a caller confuse "cryptographically sound" with "valid."
 The result type says so: `Verified` / `BadSignature` / `UnknownKeyFormat`, no `Valid` variant to misread.
 
 ### 6. Verification is pluggable by key format, with one format shipped
@@ -136,23 +136,23 @@ Each row names the owner; re-implementing the right column in this workspace is 
 | payload schemas (rebind pin, action, review) | their vocabulary owners | carries hashes, never fetches |
 | claim validity, revocation *semantics*, thresholds | query rules | none |
 | enforcement (which namespaces require signatures) | boundary hooks / gate server, policy as query | none |
-| anchor vocabulary (`AnchorId`, `Binding`) | `gix-anchor` | none — sibling isolation, CI-enforced |
+| anchor vocabulary (`AnchorId`, `Binding`) | `git-anchor` | none — sibling isolation, CI-enforced |
 | trailer parsing | nobody — dies with query's interim store | replaces it |
 
 ## Crate layout
 
 ```text
-crates/gix-attest       envelope.rs   Envelope, Target, target_key()
+crates/git-attest       envelope.rs   Envelope, Target, target_key()
                         chain.rs      sign (via store), log walk, resolve, revoke
                         key.rs        AttestKey schema, key-chain resolution, registration
                         verify.rs     Verifier trait, ssh-ed25519 impl, Verdict
                         schema.rs     register attest's own kinds at refs/schema/*
-crates/git-attest       main.rs       sign | revoke | verify | log | resolve
-                                      target syntax: <kind>:<hex>
+                        main.rs       sign | revoke | verify | log | resolve, behind
+                                      the `cli` feature; target syntax: <kind>:<hex>
 ```
 
-`gix-attest` deps: `gix-store`, `gix-refstore`, `facet-git-tree`, `facet`, `gix`, `ssh-key`, `thiserror`.
-Not `gix-anchor`, not anything from `../git-query`.
+`git-attest` deps: `gix-store`, `gix-refstore`, `facet-git-tree`, `facet`, `gix`, `ssh-key`, `thiserror`.
+Not `git-anchor`, not anything from `../git-query`.
 Conventions verbatim from this workspace: edition 2024, resolver 3, `#![forbid(unsafe_code)]`, `MIT OR Apache-2.0`, path deps intra-repo, git deps to `git-store`.
 
 ## Consumer contract
@@ -180,7 +180,7 @@ Acceptance: `git log --show-signature` / `git verify-commit` succeed on a store-
 
 `Envelope`, `Target`, `target_key`, schema registration with the universe check exercised in tests, `sign` through a caller-supplied `Signer`, `log`, ref layout.
 No crypto yet — `verify` unimplemented, not stubbed-true.
-Differential fixture: a claim written by `gix-attest` is readable by `git cat-file` and `git interpret-trailers`-free — plain commits, plain trees.
+Differential fixture: a claim written by `git-attest` is readable by `git cat-file` and `git interpret-trailers`-free — plain commits, plain trees.
 
 ### Phase 2 — two agents, parallel
 
@@ -200,7 +200,7 @@ Attest-side work is limited to API adjustments the migration surfaces.
 
 - A claim signed here verifies here and via `ssh-keygen -Y verify`; a bit-flipped commit fails.
 - `resolve` on a target with a revoked claim marks exactly that claim.
-- `cargo metadata` check proving no `gix-anchor` ↔ `gix-attest` edge is in CI.
+- `cargo metadata` check proving no `git-anchor` ↔ `git-attest` edge is in CI.
 - `../git-query`'s `claim.rs` seam comment can be deleted — its replacement compiles against the consumer contract above.
 - DELTA X1 rewritten from ABSENT to a delta list or removed.
 

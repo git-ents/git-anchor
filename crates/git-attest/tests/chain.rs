@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use gix_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
+use git_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
 use gix_store::{GixRefStore, Store};
 
 const WRITERS: usize = 4;

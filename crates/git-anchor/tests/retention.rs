@@ -8,7 +8,7 @@
 use std::process::Command;
 
 use facet_git_tree::{EntryKind, ObjectStore, RawTree, serialize_into};
-use gix_anchor::LineRange;
+use git_anchor::LineRange;
 
 /// A stand-in for a downstream consumer's `Comment` (this crate cannot
 /// depend on such a consumer, which itself depends on this crate): any
@@ -50,7 +50,7 @@ fn numbered(range: std::ops::RangeInclusive<u32>) -> String {
 fn hints_never_embed_a_gitlink() {
     let dir = fixture_repo(&numbered(1..=10));
     let repo = gix::open(dir.path()).unwrap();
-    let anchor = gix_anchor::capture(
+    let anchor = git_anchor::capture(
         &repo,
         "HEAD",
         "file.txt",
@@ -95,7 +95,7 @@ fn hints_never_embed_a_gitlink() {
 fn hints_are_reachable_from_the_storing_documents_tree() {
     let dir = fixture_repo(&numbered(1..=10));
     let repo = gix::open(dir.path()).unwrap();
-    let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap();
+    let anchor = git_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap();
 
     let store = ObjectStore::default();
     let anchor_tree = serialize_into(&anchor, &store).expect("serialize anchor");
@@ -139,10 +139,10 @@ fn anchor_round_trips_through_its_tree() {
     let dir = fixture_repo("line 1\nline 2\n\u{fe}\u{ff} non-ascii bytes\n");
     let repo = gix::open(dir.path()).unwrap();
     for lines in [None, Some(LineRange { start: 2, end: 3 })] {
-        let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", lines).unwrap();
+        let anchor = git_anchor::capture(&repo, "HEAD", "file.txt", lines).unwrap();
         let store = ObjectStore::default();
         let root = serialize_into(&anchor, &store).unwrap();
-        let back: gix_anchor::Anchor = facet_git_tree::deserialize(&root, &store).unwrap();
+        let back: git_anchor::Anchor = facet_git_tree::deserialize(&root, &store).unwrap();
         assert_eq!(back, anchor);
     }
 }

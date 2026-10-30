@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 use facet::Facet;
-use gix_anchor::Binding;
+use git_anchor::Binding;
 use gix_store::{Layout, RefPrefix, RefSegment, RepoStore};
 use test_support::init_repo;
 

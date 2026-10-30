@@ -11,7 +11,7 @@
 )]
 
 use facet_git_tree::ObjectStore;
-use gix_anchor::{Binding, LineRange};
+use git_anchor::{Binding, LineRange};
 
 fn numbered(range: std::ops::RangeInclusive<u32>) -> String {
     range.map(|n| format!("line {n}\n")).collect()
@@ -44,7 +44,7 @@ fn fixture_repo(content: &str) -> tempfile::TempDir {
 fn position_binding_round_trips_through_serialize_and_deserialize() {
     let dir = fixture_repo(&numbered(1..=10));
     let repo = gix::open(dir.path()).unwrap();
-    let anchor = gix_anchor::capture(
+    let anchor = git_anchor::capture(
         &repo,
         "HEAD",
         "file.txt",
@@ -76,7 +76,7 @@ fn position_binding_round_trips_through_serialize_and_deserialize() {
 fn anchor_id_is_stable_across_independent_stores() {
     let dir = fixture_repo(&numbered(1..=10));
     let repo = gix::open(dir.path()).unwrap();
-    let anchor = gix_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap();
+    let anchor = git_anchor::capture(&repo, "HEAD", "file.txt", None).unwrap();
 
     let first_store = ObjectStore::default();
     let handle = Binding::Position(anchor.clone())

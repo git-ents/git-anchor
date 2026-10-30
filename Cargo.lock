@@ -887,10 +887,13 @@ dependencies = [
  "facet-json",
  "facet-value",
  "gix",
- "gix-anchor",
+ "gix-object",
  "gix-store",
+ "proptest",
+ "rstest",
  "tempfile",
  "test-support",
+ "thiserror",
 ]
 
 [[package]]
@@ -904,10 +907,12 @@ dependencies = [
  "facet-json",
  "facet-value",
  "gix",
- "gix-attest",
+ "gix-refstore",
  "gix-store",
+ "ssh-key",
  "tempfile",
  "test-support",
+ "thiserror",
 ]
 
 [[package]]
@@ -971,36 +976,6 @@ dependencies = [
  "bstr",
  "gix-date",
  "gix-error",
-]
-
-[[package]]
-name = "gix-anchor"
-version = "0.0.0"
-dependencies = [
- "facet",
- "facet-git-tree",
- "gix",
- "gix-object",
- "gix-store",
- "proptest",
- "rstest",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "gix-attest"
-version = "0.0.0"
-dependencies = [
- "facet",
- "facet-git-tree",
- "gix",
- "gix-refstore",
- "gix-store",
- "ssh-key",
- "tempfile",
- "test-support",
- "thiserror",
 ]
 
 [[package]]
