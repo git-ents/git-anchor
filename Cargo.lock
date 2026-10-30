@@ -973,7 +973,7 @@ dependencies = [
 [[package]]
 name = "git-database"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#9cdd9720e94cea96048117e5e629d7e250cf66f5"
+source = "git+https://github.com/git-ents/git-store#83986eb60997d67104e499cc0eee82fc51131ea0"
 dependencies = [
  "anyhow",
  "clap",
@@ -988,7 +988,7 @@ dependencies = [
 [[package]]
 name = "git-prolly"
 version = "0.0.0"
-source = "git+https://github.com/git-ents/git-store#9cdd9720e94cea96048117e5e629d7e250cf66f5"
+source = "git+https://github.com/git-ents/git-store#83986eb60997d67104e499cc0eee82fc51131ea0"
 dependencies = [
  "facet",
  "facet-git-tree",
@@ -1001,7 +1001,7 @@ dependencies = [
 [[package]]
 name = "git-store"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#9cdd9720e94cea96048117e5e629d7e250cf66f5"
+source = "git+https://github.com/git-ents/git-store#83986eb60997d67104e499cc0eee82fc51131ea0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1548,7 +1548,7 @@ dependencies = [
 [[package]]
 name = "gix-refstore"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store#9cdd9720e94cea96048117e5e629d7e250cf66f5"
+source = "git+https://github.com/git-ents/git-store#83986eb60997d67104e499cc0eee82fc51131ea0"
 dependencies = [
  "gix",
  "gix-hash",
