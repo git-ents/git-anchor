@@ -4,12 +4,12 @@
 //! commit's oid, so no side mapping exists. Claims about one target chain as
 //! parent and child on the one ref, and the ref only ever advances by a
 //! commit whose parent is the tip it was read from — the compare-and-swap
-//! `gix-store` already performs *is* chain integrity, so a lost race retries
+//! `git-store` already performs *is* chain integrity, so a lost race retries
 //! on the new tip and concurrent claims serialize instead of forking.
 //!
 //! Everything mechanical here is store's:
 //!
-//! - the write is [`gix_store::Kind::update`], so the tree is the ordinary
+//! - the write is [`git_store::Kind::update`], so the tree is the ordinary
 //!   `{value/, schema/}` document tree and the commit is an ordinary commit;
 //! - the signature is whatever [`Signer`](gix_refstore::Signer) the caller
 //!   configured with [`Store::with_signer`], landing in the standard `gpgsig`
@@ -28,7 +28,7 @@
 
 use gix::ObjectId;
 use gix::objs::{Find, Write};
-use gix_store::{
+use git_store::{
     Committer, DocumentInspection, Expectation, Layout, PublishOptions, RefName, RefPath,
     RefPrefix, RefSegment, RefStore, Store,
 };
@@ -111,7 +111,7 @@ where
     /// [`Error::NormalForm`] when the target key cannot be hashed,
     /// [`Error::RefName`] when it is not a usable ref segment, and
     /// [`Error::Store`] when the write fails — including
-    /// [`gix_store::Error::NoSchema`] when
+    /// [`git_store::Error::NoSchema`] when
     /// [`register_claim_schema`](crate::register_claim_schema) has not run.
     pub fn sign(&self, envelope: &Envelope) -> Result<ObjectId> {
         self.append(&envelope.target, envelope)
@@ -176,7 +176,7 @@ where
 
             match kind.publish_prepared(&prepared, options) {
                 Ok(publication) => return Ok(publication.commit()),
-                Err(gix_store::Error::Backend(_)) => continue,
+                Err(git_store::Error::Backend(_)) => continue,
                 Err(error) => return Err(error.into()),
             }
         }
@@ -323,7 +323,7 @@ pub fn layout() -> Layout {
 mod tests {
     #![allow(clippy::unwrap_used, reason = "unit test")]
 
-    use gix_store::MemoryRefStore;
+    use git_store::MemoryRefStore;
 
     use super::*;
     use crate::fixture::{envelope, oid, target};

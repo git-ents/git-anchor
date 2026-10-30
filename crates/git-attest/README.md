@@ -17,7 +17,7 @@ The kind is a label, never interpreted and never checked against a list: anchor 
 The armored SSHSIG block lands in the claim commit's standard `gpgsig` header, so `git log --show-signature` and `git verify-commit` read claims with none of this installed.
 The signing key is published as a key claim the first time it signs; `--key <claim-id>` names a specific link after a rotation.
 
-A payload may be an existing tree hash, or a document built for `--kind` with `--json` or `--interactive` — written through `gix-store`'s dynamic write path.
+A payload may be an existing tree hash, or a document built for `--kind` with `--json` or `--interactive` — written through `git-store`'s dynamic write path.
 
 `verify` reports cryptography and nothing else: `Verified` (exit 0), `BadSignature` (exit 1), `UnknownKeyFormat` (exit 2).
 A sound signature is not a valid claim — revocation is `resolve`'s answer, and admissibility is a query rule's.

@@ -9,7 +9,7 @@
 //! because it carries payload hashes without understanding them.
 //!
 //! Registration is also the enforcement point for the frozen target
-//! descriptor. [`gix_store::KindSchema::write`] runs `check_identity_subtrees`
+//! descriptor. [`git_store::KindSchema::write`] runs `check_identity_subtrees`
 //! over the compiled schema, so a [`Target`](crate::Target) whose shape left
 //! the identity normal form's universe would be refused here — before
 //! anything is published — rather than producing target keys the frozen
@@ -17,7 +17,7 @@
 
 use facet::Facet;
 use gix::objs::{Find, Write};
-use gix_store::{Committer, RefSegment, RefStore, Store, schema_of};
+use git_store::{Committer, RefSegment, RefStore, Store, schema_of};
 
 use crate::envelope::{Envelope, Target};
 use crate::error::{Error, Result};
@@ -158,7 +158,7 @@ mod tests {
 
     use facet::Facet;
     use facet_git_tree::UniverseError;
-    use gix_store::{MemoryRefStore, Store};
+    use git_store::{MemoryRefStore, Store};
 
     use super::*;
     use crate::fixture::memory_store;
@@ -274,7 +274,7 @@ mod tests {
             .put(&schema_of::<WideEnvelope>().unwrap())
             .unwrap_err();
 
-        let gix_store::Error::IdentityUniverse { kind, source, .. } = error else {
+        let git_store::Error::IdentityUniverse { kind, source, .. } = error else {
             panic!("expected a universe refusal, got {error}");
         };
         assert_eq!(kind, claim_segment());

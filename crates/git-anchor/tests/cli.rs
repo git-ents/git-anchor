@@ -3,7 +3,7 @@
 //!
 //! `git-anchor` defines no document type of its own, so every test here
 //! first publishes a schema for some test fixture kind — the same thing any
-//! `gix-store` consumer would already have done before a user ever runs
+//! `git-store` consumer would already have done before a user ever runs
 //! `git anchor`.
 
 use std::path::Path;
@@ -11,7 +11,7 @@ use std::process::Command;
 
 use facet::Facet;
 use git_anchor::Binding;
-use gix_store::{Layout, RefPrefix, RefSegment, RepoStore};
+use git_store::{Layout, RefPrefix, RefSegment, RepoStore};
 use test_support::init_repo;
 
 const BIN: &str = env!("CARGO_BIN_EXE_git-anchor");
@@ -123,7 +123,7 @@ fn setup(path: &Path) {
 /// The `{data, schema}` [`Layout`] `git-anchor` itself derives from a
 /// `--prefix` value — duplicated here (rather than depending on the binary's
 /// internals) since a fixture publisher is exactly the kind of independent
-/// `gix-store` consumer `git anchor` is meant to work with. Schemas always
+/// `git-store` consumer `git anchor` is meant to work with. Schemas always
 /// land in the shared `refs/schema` registry, data directly under `prefix`.
 fn layout(prefix: &str) -> Layout {
     let prefix = RefPrefix::new(prefix).unwrap();

@@ -24,7 +24,7 @@ It owns no payload, no policy, no validity, no hash function, and no ref-advance
 
 Everything attest needs from store exists and is shaped correctly; this is an assembly job, not a substrate job.
 
-- Signing: `gix-refstore`'s `Signer`/`SignatureBytes`/`ErasedSigner` seam, wired into `gix-store`'s `write_commit`, which serializes the commit without the signature header and signs those bytes (`gix-store/src/store.rs:311-337`).
+- Signing: `gix-refstore`'s `Signer`/`SignatureBytes`/`ErasedSigner` seam, wired into `git-store`'s `write_commit`, which serializes the commit without the signature header and signs those bytes (`git-store/src/store.rs:311-337`).
   This is git's own object-signing discipline — and the header must be git's too.
   **Store-side prerequisite (one small change): store the signature as an armored block in the `gpgsig` header, not hex in a bespoke `signature` extra header.**
   Git uses `gpgsig` for every signature format (with `gpg.format = ssh` it holds the ASCII-armored `SSH SIGNATURE` block that `ssh-keygen -Y sign` emits), so `git log --show-signature` and `git verify-commit` work on claim commits with no attest tooling installed.
@@ -151,7 +151,7 @@ crates/git-attest       envelope.rs   Envelope, Target, target_key()
                                       the `cli` feature; target syntax: <kind>:<hex>
 ```
 
-`git-attest` deps: `gix-store`, `gix-refstore`, `facet-git-tree`, `facet`, `gix`, `ssh-key`, `thiserror`.
+`git-attest` deps: `git-store`, `gix-refstore`, `facet-git-tree`, `facet`, `gix`, `ssh-key`, `thiserror`.
 Not `git-anchor`, not anything from `../git-query`.
 Conventions verbatim from this workspace: edition 2024, resolver 3, `#![forbid(unsafe_code)]`, `MIT OR Apache-2.0`, path deps intra-repo, git deps to `git-store`.
 

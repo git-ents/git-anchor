@@ -18,7 +18,7 @@ use std::process::{Command, Stdio};
 use git_attest::verify::signed_payload;
 use git_attest::{AttestKey, Claim, Claims, Envelope, Target, Verdict, layout, register_schemas};
 use gix_refstore::{SignatureBytes, Signer};
-use gix_store::{GixRefStore, Store};
+use git_store::{GixRefStore, Store};
 
 /// Signs by shelling out to `ssh-keygen -Y sign`, so the bytes on the commit
 /// are byte-for-byte what git's own ssh signing backend would have produced —

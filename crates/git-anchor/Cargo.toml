@@ -28,7 +28,7 @@ required-features = ["cli"]
 [dependencies]
 facet = { workspace = true }
 facet-git-tree = { workspace = true }
-gix-store = { workspace = true }
+git-store = { workspace = true }
 gix = { workspace = true, features = ["revision", "blob-diff"] }
 gix-object = { workspace = true }
 thiserror = { workspace = true }

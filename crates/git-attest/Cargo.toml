@@ -29,7 +29,7 @@ required-features = ["cli"]
 [dependencies]
 facet = { workspace = true }
 facet-git-tree = { workspace = true }
-gix-store = { workspace = true }
+git-store = { workspace = true }
 gix-refstore = { workspace = true }
 gix = { workspace = true }
 ssh-key = { workspace = true }

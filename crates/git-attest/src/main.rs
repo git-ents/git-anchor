@@ -24,7 +24,7 @@
 //!   installed.
 //! - **payload documents**, when `--json`/`--interactive` build one instead of
 //!   `<payload-tree>` naming an existing tree. That write goes through
-//!   `gix-store`'s [`DocumentBuilder`] and its dynamic kind handle — the
+//!   `git-store`'s [`DocumentBuilder`] and its dynamic kind handle — the
 //!   dynamic write path exists once, and this is a caller of it.
 //!
 //! `verify` reports cryptography and nothing else: a [`Verdict::Verified`]
@@ -52,7 +52,7 @@ use git_attest::{
     register_schemas,
 };
 use gix::ObjectId;
-use gix_store::{DocumentBuilder, Layout, RefPrefix, RefSegment, RepoStore};
+use git_store::{DocumentBuilder, Layout, RefPrefix, RefSegment, RepoStore};
 
 use crate::signer::SigningKey;
 

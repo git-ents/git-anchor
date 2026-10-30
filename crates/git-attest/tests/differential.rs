@@ -14,7 +14,7 @@ use std::process::Command;
 
 use git_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
 use gix_refstore::{SignatureBytes, Signer};
-use gix_store::{GixRefStore, Store};
+use git_store::{GixRefStore, Store};
 
 /// A signer standing in for `ssh-keygen -Y sign`: the store carries whatever
 /// bytes it is handed, and this phase has no crypto to hand it. The *shape*

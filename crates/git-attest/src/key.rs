@@ -24,7 +24,7 @@
 use facet::Facet;
 use gix::ObjectId;
 use gix::objs::{Find, Write};
-use gix_store::{Committer, RefStore};
+use git_store::{Committer, RefStore};
 
 use crate::chain::{Claims, KEY_TARGET_KIND};
 use crate::error::{Error, Result};
@@ -127,7 +127,7 @@ where
     /// # Errors
     ///
     /// [`Error::Store`] when the key document or the claim cannot be written —
-    /// including [`gix_store::Error::NoSchema`] when
+    /// including [`git_store::Error::NoSchema`] when
     /// [`register_key_schema`](crate::register_key_schema) has not run —
     /// and [`Error::RefName`]/[`Error::NormalForm`] for the derived names.
     pub fn add_key(&self, key: &AttestKey) -> Result<ObjectId> {
@@ -277,7 +277,7 @@ where
         // `compile` yields the very tree a write commits, so the entity name
         // is the document's own hash and the write is idempotent.
         let tree = kind.compile(key)?;
-        let name = gix_store::RefSegment::new(tree.to_string())?.into();
+        let name = git_store::RefSegment::new(tree.to_string())?.into();
         kind.put(&name, key)?;
         Ok(tree)
     }

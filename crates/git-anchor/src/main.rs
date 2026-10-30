@@ -1,6 +1,6 @@
 //! `git-anchor`: a git external subcommand (`git anchor …`) that captures
 //! bindings and injects them into entities of any kind published in a
-//! `gix-store` registry — it defines no document type of its own.
+//! `git-store` registry — it defines no document type of its own.
 //!
 //! `inject <kind>` requires `<kind>`'s published schema to embed
 //! [`git_anchor::Binding`]'s shape (located by structural comparison, not by
@@ -27,7 +27,7 @@ use facet_value::{VObject, Value};
 use git_anchor::{
     Binding, CaptureHandle, CommitIdentity, LineRange, NoHints, capture, capture_worktree,
 };
-use gix_store::{
+use git_store::{
     DeleteResult, DocumentBuilder, Layout, RefPath, RefPrefix, RefSegment, RepoStore,
     entity_name_under,
 };
@@ -40,9 +40,9 @@ use gix_store::{
 )]
 struct Cli {
     /// The store's data ref namespace. Defaults to `refs/anchors`; pass any
-    /// other prefix a `gix-store` consumer publishes under (e.g.
+    /// other prefix a `git-store` consumer publishes under (e.g.
     /// `refs/forge` for `git forge` entities). Schemas are always read from
-    /// `refs/schema`, the shared `gix-store` default, so kinds published by
+    /// `refs/schema`, the shared `git-store` default, so kinds published by
     /// any consumer are injectable here and vice versa.
     #[arg(long, global = true, default_value = "refs/anchors")]
     prefix: RefPrefix,
@@ -174,7 +174,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let repo = gix::discover(".").context("not inside a git repository")?;
-    // Schemas are always read from `refs/schema`, the shared `gix-store`
+    // Schemas are always read from `refs/schema`, the shared `git-store`
     // default -- the one registry every consumer publishes kinds into --
     // while data lives directly under the data prefix, matching
     // `git forge`'s `refs/forge` layout.

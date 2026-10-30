@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used, reason = "test fixture")]
 
 use gix::ObjectId;
-use gix_store::{MemoryRefStore, Store};
+use git_store::{MemoryRefStore, Store};
 
 use crate::envelope::{Envelope, Target};
 

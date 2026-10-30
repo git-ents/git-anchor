@@ -2,7 +2,7 @@
 //! forking.
 //!
 //! Nothing here is attest's mechanism — the compare-and-swap is
-//! `gix-store`'s, over a real repository's refs, and a lost race retries on
+//! `git-store`'s, over a real repository's refs, and a lost race retries on
 //! the new tip. The test exists because that property *is* the chain
 //! guarantee: a claim ref that only ever advances by one commit whose parent
 //! is the expected tip cannot fork silently.
@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 
 use git_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
-use gix_store::{GixRefStore, Store};
+use git_store::{GixRefStore, Store};
 
 const WRITERS: usize = 4;
 const CLAIMS_EACH: usize = 4;

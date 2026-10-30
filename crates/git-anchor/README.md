@@ -12,7 +12,7 @@ A caller may supply a 1-based inclusive line range at capture time — `git anch
 Everything else the library retains — content fingerprints, structural descriptors — is a *hint*: additive, versioned, upgradeable, and never part of the id.
 Anchors resolve independently of any consumer, through three named oracles — reviews, TODO trackers, and blame overlays all reuse the same mechanism.
 The library is `gix`-native and oid-in/oid-out: it performs its own object reads over a [`gix::Repository`], with no materialized worktree required for diffs.
-It persists nothing itself — no ref, no commit; persistence belongs to the consumer, over `gix-store`.
+It persists nothing itself — no ref, no commit; persistence belongs to the consumer, over `git-store`.
 
 ### Capture and the oracles
 
@@ -69,7 +69,7 @@ It requires only object reads.
 ## The `git anchor` CLI
 
 Capture a binding and inject it into a document of a kind it was never compiled against.
-`git anchor` defines no document type of its own: it reads a kind's published schema out of the registry at run time and writes an entity conforming to it, over `gix-store`'s dynamic (schema-only) write path.
+`git anchor` defines no document type of its own: it reads a kind's published schema out of the registry at run time and writes an entity conforming to it, over `git-store`'s dynamic (schema-only) write path.
 
 The binary is named `git-anchor`, so git's external-subcommand dispatch makes `git anchor …` work with nothing more than `PATH`.
 
@@ -136,7 +136,7 @@ git anchor remove <kind> <name>...  (alias: rm)       # delete one or more entit
 ```
 
 `--prefix <PREFIX>` (default `refs/anchors`) is a global option selecting the store's data ref namespace — entities land directly under it (e.g. `refs/forge/<kind>/…` for `git forge`'s store).
-Schemas always come from `refs/schema`, the shared `gix-store` default, so a kind published by any `gix-store` consumer is injectable here and vice versa.
+Schemas always come from `refs/schema`, the shared `git-store` default, so a kind published by any `git-store` consumer is injectable here and vice versa.
 `inject` also publishes `refs/anchors/<anchor-id>` — the registry `git query`'s `bind/5` resolves through — for `Binding::Position` bindings.
 `<name>` is an entity's full name, `<anchor-id-hex>/<id-hex>`, exactly as `inject`/`list` printed it.
 
@@ -145,7 +145,7 @@ A required field neither the binding nor `<text>` can fill refuses `inject` outr
 
 ### How it works
 
-`git anchor` is a thin CLI over [`gix-store`](https://github.com/git-ents/git-store)'s dynamic (schema-only) read/write path: `inject` fetches `<kind>`'s published `Schema`, locates the field structurally equal to `Binding`'s own schema, and writes a `facet_value::Value` conforming to it — never a compiled Rust type.
+`git anchor` is a thin CLI over [`git-store`](https://github.com/git-ents/git-store)'s dynamic (schema-only) read/write path: `inject` fetches `<kind>`'s published `Schema`, locates the field structurally equal to `Binding`'s own schema, and writes a `facet_value::Value` conforming to it — never a compiled Rust type.
 `show` prints an entity exactly as stored and resolves nothing: mapping a position binding onto another revision is the library's oracle chain (`diff_trace`/`fingerprint_oracle`/`op_log`), which is library-internal — no command here calls it.
 Resolution is `git-query`'s `bind/5`.
 The document embeds the anchor's hints inline, so they stay reachable — no gitlinks, no copies.

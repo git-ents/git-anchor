@@ -1,7 +1,7 @@
 //! Signed claim envelopes and chains (ARCHITECTURE.md, "git-attest").
 //!
 //! A claim is a chained commit on a claim ref. The [`Envelope`] — target
-//! descriptor, payload tree hash, signing-key id — is a `gix-store` typed
+//! descriptor, payload tree hash, signing-key id — is a `git-store` typed
 //! document; the signature bytes ride the claim commit's standard `gpgsig`
 //! header, so `git log --show-signature` verifies a claim with stock git and
 //! no tooling of ours installed.
@@ -12,8 +12,8 @@
 //! | concern | owner |
 //! |---|---|
 //! | the hash function, the identity normal form | `facet-git-tree` — called here |
-//! | signing mechanics, signature transport | `gix-store`'s `Signer` seam and `gpgsig` header — written through here |
-//! | ref writes, compare-and-swap, layout | `gix-store` — called here |
+//! | signing mechanics, signature transport | `git-store`'s `Signer` seam and `gpgsig` header — written through here |
+//! | ref writes, compare-and-swap, layout | `git-store` — called here |
 //! | payload schemas (rebind pin, action, review) | their vocabulary owners — hashes carried, never fetched |
 //! | claim validity, revocation *semantics*, thresholds | query rules — absent here |
 //! | enforcement (which namespaces require signatures) | boundary hooks and policy — absent here |
@@ -47,10 +47,10 @@
 //!
 //! ```
 //! use git_attest::{Claims, Envelope, Target, register_schemas};
-//! use gix_store::{MemoryRefStore, Store};
+//! use git_store::{MemoryRefStore, Store};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Any `gix-store` store will do; a real repository's is the usual one.
+//! // Any `git-store` store will do; a real repository's is the usual one.
 //! // `git_attest::layout()` is what puts claim refs at `refs/claims/<target-key>`.
 //! let store = Store::with_layout(
 //!     MemoryRefStore::new(),

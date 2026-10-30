@@ -7,7 +7,7 @@
 
 use facet::Facet;
 use gix_object::{Find, Write};
-use gix_store::{Committer, RefSegment, RefStore, Store, schema_of};
+use git_store::{Committer, RefSegment, RefStore, Store, schema_of};
 
 use crate::error::{Error, Result};
 use crate::oid::Oid;
@@ -59,7 +59,7 @@ where
 mod tests {
     #![allow(clippy::unwrap_used, reason = "unit test")]
 
-    use gix_store::{MemoryRefStore, ObjectId as StoreObjectId, RefSegment, Store};
+    use git_store::{MemoryRefStore, ObjectId as StoreObjectId, RefSegment, Store};
 
     use super::*;
     use crate::fixture::empty_store;

@@ -19,7 +19,7 @@
 
 use gix::ObjectId;
 use gix::objs::{Find, Write};
-use gix_store::{Committer, RefStore, SignatureBytes, Store};
+use git_store::{Committer, RefStore, SignatureBytes, Store};
 
 use crate::chain::Claims;
 use crate::error::{Error, Result};

@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 
 use facet::Facet;
 use git_attest::{Target, target_key};
-use gix_store::{Layout, RefPrefix, RefSegment, RepoStore};
+use git_store::{Layout, RefPrefix, RefSegment, RepoStore};
 use test_support::init_repo;
 
 const BIN: &str = env!("CARGO_BIN_EXE_git-attest");

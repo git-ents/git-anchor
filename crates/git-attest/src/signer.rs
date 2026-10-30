@@ -1,7 +1,7 @@
 //! The CLI's signing path: `ssh-keygen -Y sign -n git`, and nothing else.
 //!
-//! `git-attest` contains no signing code — signing is `gix-store`'s
-//! [`Signer`](gix_store::Signer) seam, and the *choice* of signer is a user
+//! `git-attest` contains no signing code — signing is `git-store`'s
+//! [`Signer`](git_store::Signer) seam, and the *choice* of signer is a user
 //! interface concern, so it lives here. What this module produces is the
 //! armored SSHSIG block `ssh-keygen -Y sign` writes, verbatim: exactly what the
 //! `gpgsig` transport stores, what `git_attest::verify::SshEd25519` checks, and
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
-use gix_store::{SignatureBytes, Signer};
+use git_store::{SignatureBytes, Signer};
 
 /// The signing key a run of `git attest` uses: the private key `ssh-keygen`
 /// signs with, and the OpenSSH public line the key claim publishes.
@@ -83,7 +83,7 @@ impl SigningKey {
     }
 
     /// A [`Signer`] over this key, to hand to
-    /// [`Store::with_signer`](gix_store::Store::with_signer).
+    /// [`Store::with_signer`](git_store::Store::with_signer).
     pub fn signer(&self) -> SshKeygen {
         SshKeygen {
             key: self.private.clone(),

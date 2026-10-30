@@ -10,9 +10,9 @@
 /// [`Verdict`](crate::Verdict) rather than an error.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// A `gix-store` read or write failed.
+    /// A `git-store` read or write failed.
     #[error(transparent)]
-    Store(#[from] gix_store::Error),
+    Store(#[from] git_store::Error),
     /// Hashing a [`Target`](crate::Target) through the identity normal form
     /// failed — a name the frozen mapping cannot express, or a backend error
     /// from the object store the hash was written into.
@@ -21,7 +21,7 @@ pub enum Error {
     /// A claim ref name could not be assembled — a target key that is not a
     /// usable ref segment.
     #[error(transparent)]
-    RefName(#[from] gix_store::InvalidRefName),
+    RefName(#[from] git_store::InvalidRefName),
     /// A schema this crate owns could not be registered: an invalid kind
     /// name, a schema that cannot be derived, or a store write failure.
     #[error("registering the {kind} schema failed: {source}")]
@@ -29,7 +29,7 @@ pub enum Error {
         /// The kind whose schema registration failed.
         kind: &'static str,
         /// Why it failed.
-        source: Box<gix_store::Error>,
+        source: Box<git_store::Error>,
     },
     /// A schema could not be derived from a Rust type.
     #[error(transparent)]
