@@ -26,19 +26,19 @@ path = "tests/cli.rs"
 required-features = ["cli"]
 
 [dependencies]
-facet = { version = "0.50.0-rc.7", features = ["reflect"] }
-facet-git-tree = "0.1.0-alpha.1"
-gix-store = { git = "https://github.com/git-ents/git-store" }
-gix = { version = "0.85.0", default-features = false, features = ["sha1", "revision", "blob-diff"] }
-gix-object = "0.62.0"
-thiserror = "2"
-anyhow = { version = "1", optional = true }
-clap = { version = "4", features = ["derive"], optional = true }
-facet-json = { version = "0.50.0-rc.7", optional = true }
-facet-value = { version = "0.50.0-rc.7", optional = true }
+facet = { workspace = true }
+facet-git-tree = { workspace = true }
+gix-store = { workspace = true }
+gix = { workspace = true, features = ["revision", "blob-diff"] }
+gix-object = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+facet-json = { workspace = true, optional = true }
+facet-value = { workspace = true, optional = true }
 
 [dev-dependencies]
-proptest = "1"
-rstest = "0.26"
-tempfile = "3"
-test-support = { path = "../test-support" }
+proptest = { workspace = true }
+rstest = { workspace = true }
+tempfile = { workspace = true }
+test-support = { workspace = true }
