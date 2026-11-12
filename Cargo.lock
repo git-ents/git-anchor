@@ -383,6 +383,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
+name = "crunchy"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
+
+[[package]]
 name = "crypto-bigint"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -682,13 +688,15 @@ dependencies = [
 [[package]]
 name = "facet-git-tree"
 version = "0.1.0-alpha.3"
-source = "git+https://github.com/git-ents/facet-git-tree#c4286e935d208361c584725ab63f8ebbfc1381b9"
+source = "git+https://github.com/git-ents/facet-git-tree#efa77308ea075f17db4b9d724c31d35f683f8f98"
 dependencies = [
  "facet",
  "facet-value",
  "gix-hash",
  "gix-object",
  "gix-odb",
+ "half",
+ "ryu",
  "thiserror",
 ]
 
@@ -971,37 +979,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "git-database"
-version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store?rev=83986eb60997d67104e499cc0eee82fc51131ea0#83986eb60997d67104e499cc0eee82fc51131ea0"
-dependencies = [
- "anyhow",
- "clap",
- "facet-json",
- "facet-value",
- "git-prolly",
- "gix",
- "gix-refstore",
- "thiserror",
-]
-
-[[package]]
-name = "git-prolly"
-version = "0.0.0"
-source = "git+https://github.com/git-ents/git-store?rev=83986eb60997d67104e499cc0eee82fc51131ea0#83986eb60997d67104e499cc0eee82fc51131ea0"
-dependencies = [
- "facet",
- "facet-git-tree",
- "facet-json",
- "facet-value",
- "gix",
- "thiserror",
-]
-
-[[package]]
 name = "git-store"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store?rev=83986eb60997d67104e499cc0eee82fc51131ea0#83986eb60997d67104e499cc0eee82fc51131ea0"
+source = "git+https://github.com/git-ents/git-store#e6f51bd8da3154af4548c791a34f9988b0b4e4a1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1010,7 +990,6 @@ dependencies = [
  "facet-git-tree",
  "facet-json",
  "facet-value",
- "git-database",
  "gix",
  "gix-refstore",
  "thiserror",
@@ -1548,7 +1527,7 @@ dependencies = [
 [[package]]
 name = "gix-refstore"
 version = "0.1.0"
-source = "git+https://github.com/git-ents/git-store?rev=83986eb60997d67104e499cc0eee82fc51131ea0#83986eb60997d67104e499cc0eee82fc51131ea0"
+source = "git+https://github.com/git-ents/git-store#e6f51bd8da3154af4548c791a34f9988b0b4e4a1"
 dependencies = [
  "gix",
  "gix-hash",
@@ -1767,6 +1746,17 @@ dependencies = [
  "ff",
  "rand_core 0.6.4",
  "subtle",
+]
+
+[[package]]
+name = "half"
+version = "2.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
+dependencies = [
+ "cfg-if",
+ "crunchy",
+ "zerocopy",
 ]
 
 [[package]]
@@ -2500,6 +2490,12 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "same-file"

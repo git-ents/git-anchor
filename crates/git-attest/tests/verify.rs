@@ -17,8 +17,8 @@ use std::process::{Command, Stdio};
 
 use git_attest::verify::signed_payload;
 use git_attest::{AttestKey, Claim, Claims, Envelope, Target, Verdict, layout, register_schemas};
+use git_store::RepoStore;
 use gix_refstore::{SignatureBytes, Signer};
-use git_store::{GixRefStore, Store};
 
 /// Signs by shelling out to `ssh-keygen -Y sign`, so the bytes on the commit
 /// are byte-for-byte what git's own ssh signing backend would have produced —
@@ -148,8 +148,7 @@ fn a_signed_claim_verifies_here_and_under_both_real_tools() {
     let allowed = trust(dir.path(), &public);
 
     let repo = gix::open(dir.path()).unwrap();
-    let store = Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout())
-        .with_signer(SshKeygen { key });
+    let store = RepoStore::open_with_layout(&repo, layout()).with_signer(SshKeygen { key });
     register_schemas(&store).unwrap();
     let claims = Claims::open(&store);
 
@@ -260,10 +259,8 @@ fn a_rotation_verifies_through_the_key_it_replaces() {
     let (stranger_key, _stranger_public) = ssh_key(dir.path(), "stranger");
 
     let repo = gix::open(dir.path()).unwrap();
-    let signing = |key: PathBuf| {
-        Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout())
-            .with_signer(SshKeygen { key })
-    };
+    let signing =
+        |key: PathBuf| RepoStore::open_with_layout(&repo, layout()).with_signer(SshKeygen { key });
 
     let as_first = signing(first_key);
     register_schemas(&as_first).unwrap();

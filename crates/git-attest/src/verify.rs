@@ -17,9 +17,9 @@
 //! respectively. Neither is answerable here, and nothing here answers it
 //! partially.
 
+use git_store::{Committer, RefStore, Sha1, SignatureBytes, Store, Tagged};
 use gix::ObjectId;
 use gix::objs::{Find, Write};
-use git_store::{Committer, RefStore, SignatureBytes, Store};
 
 use crate::chain::Claims;
 use crate::error::{Error, Result};
@@ -168,7 +168,7 @@ pub(crate) fn verify_commit<R, O>(
 ) -> Result<Verdict>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     let Some(verifier) = verifier.or_else(|| verifier_for(&key.format)) else {
         return Ok(Verdict::UnknownKeyFormat);
@@ -187,7 +187,7 @@ where
 fn raw_commit<R, O>(store: &Store<R, O>, id: ObjectId) -> Result<Vec<u8>>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     let mut buf = Vec::new();
     let data = store
@@ -204,7 +204,7 @@ where
 impl<R, O> Claims<'_, R, O>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     /// The cryptographic verdict on `claim`, and nothing else.
     ///
@@ -270,7 +270,7 @@ where
 pub fn signed_payload<R, O>(store: &Store<R, O>, commit: ObjectId) -> Result<Vec<u8>>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     Ok(signed_bytes(&raw_commit(store, commit)?))
 }

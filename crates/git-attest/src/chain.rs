@@ -10,7 +10,7 @@
 //! Everything mechanical here is store's:
 //!
 //! - the write is [`git_store::Kind::update`], so the tree is the ordinary
-//!   `{value/, schema/}` document tree and the commit is an ordinary commit;
+//!   `.schema`-enveloped document tree and the commit is an ordinary commit;
 //! - the signature is whatever [`Signer`](gix_refstore::Signer) the caller
 //!   configured with [`Store::with_signer`], landing in the standard `gpgsig`
 //!   header — **attest contributes zero signing code**;
@@ -26,12 +26,12 @@
 //! would be the abstraction leaking — every other payload kind is a label
 //! this crate carries and never matches on.
 
-use gix::ObjectId;
-use gix::objs::{Find, Write};
 use git_store::{
     Committer, DocumentInspection, Expectation, Layout, PublishOptions, RefName, RefPath,
-    RefPrefix, RefSegment, RefStore, Store,
+    RefPrefix, RefSegment, RefStore, Sha1, Store, Tagged,
 };
+use gix::ObjectId;
+use gix::objs::{Find, Write};
 
 use crate::envelope::{Envelope, Target, target_key};
 use crate::error::Error;
@@ -86,7 +86,7 @@ pub const REVOCATION_KIND: &str = "revocation";
 impl<'s, R, O> Claims<'s, R, O>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     /// Open the claims of `store`.
     ///

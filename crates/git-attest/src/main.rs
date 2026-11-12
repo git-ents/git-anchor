@@ -51,8 +51,8 @@ use git_attest::{
     AttestKey, Claim, Claims, Envelope, KEY_KIND, KEY_TARGET_KIND, Target, Verdict,
     register_schemas,
 };
-use gix::ObjectId;
 use git_store::{DocumentBuilder, Layout, RefPrefix, RefSegment, RepoStore};
+use gix::ObjectId;
 
 use crate::signer::SigningKey;
 
@@ -473,12 +473,11 @@ fn parse_json(raw: &str) -> Result<Value> {
 /// Build a document of `kind` by prompting for the fields its published schema
 /// names, one answer per line on stdin.
 ///
-/// The shape, the defaults, and the refusal to build an incomplete document are
-/// all [`DocumentBuilder`]'s: this function contributes the prompts and nothing
+/// The shape and the refusal to build an incomplete document are all
+/// [`DocumentBuilder`]'s: this function contributes the prompts and nothing
 /// else. Answers are JSON literals, except that a `String`-shaped field takes
 /// its line verbatim (quoting a string to write a string would be a tax with no
-/// payer), and an empty answer to a field the schema can default leaves it
-/// unset.
+/// payer), and a blank answer to an `Optional` field leaves it absent.
 fn prompt_document(store: &RepoStore<'_>, kind: &RefSegment) -> Result<Value> {
     let schema = store
         .dynamic(kind.clone())
@@ -486,14 +485,14 @@ fn prompt_document(store: &RepoStore<'_>, kind: &RefSegment) -> Result<Value> {
         .get()?
         .ok_or_else(|| anyhow!("no schema published for kind {kind}"))?;
     let mut builder = DocumentBuilder::for_schema(&schema)?;
-    let fields: Vec<(String, Node, bool)> = builder
+    let fields: Vec<(String, Node)> = builder
         .fields()
-        .map(|(name, node, has_default)| (name.to_owned(), node.clone(), has_default))
+        .map(|(name, node)| (name.to_owned(), node.clone()))
         .collect();
 
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
-    for (name, node, has_default) in fields {
+    for (name, node) in fields {
         let node = resolve(&schema, &node).unwrap_or(&Node::Dynamic);
         let string_like = matches!(node, Node::String | Node::Bytes);
         let optional = matches!(node, Node::Optional(_));
@@ -501,18 +500,13 @@ fn prompt_document(store: &RepoStore<'_>, kind: &RefSegment) -> Result<Value> {
         eprint!("{name}: ");
         let raw = match lines.next() {
             Some(line) => line.context("reading stdin")?,
-            None if has_default || optional => break,
+            None if optional => break,
             None => bail!("unexpected end of input while filling {name}"),
         };
         let raw = raw.trim_end_matches(['\n', '\r']);
-        if raw.trim().is_empty() {
-            if optional {
-                builder.set(&name, Value::NULL)?;
-                continue;
-            }
-            if has_default {
-                continue;
-            }
+        if raw.trim().is_empty() && optional {
+            builder.set(&name, Value::NULL)?;
+            continue;
         }
         let value = if string_like {
             Value::from(raw)
@@ -531,7 +525,7 @@ fn prompt_document(store: &RepoStore<'_>, kind: &RefSegment) -> Result<Value> {
 /// is not a `Ref`.
 fn resolve<'s>(schema: &'s Schema, node: &'s Node) -> Option<&'s Node> {
     match node {
-        Node::Ref(name) => schema.defs.get(name),
+        Node::Ref(name) => schema.defs().get(name),
         other => Some(other),
     }
 }

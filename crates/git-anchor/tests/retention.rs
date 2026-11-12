@@ -7,7 +7,7 @@
 
 use std::process::Command;
 
-use facet_git_tree::{EntryKind, ObjectStore, RawTree, serialize_into};
+use facet_git_tree::{EntryKind, ObjectStore, Oid, RawTree, serialize_into};
 use git_anchor::LineRange;
 
 /// A stand-in for a downstream consumer's `Comment` (this crate cannot
@@ -65,11 +65,13 @@ fn hints_never_embed_a_gitlink() {
         .get_tree(&root)
         .expect("anchor tree")
         .expect("anchor tree present");
-    let hints_oid = top
-        .iter()
-        .find(|e| e.filename == "hints")
-        .expect("hints entry")
-        .oid;
+    let hints_oid = Oid::new(
+        top.iter()
+            .find(|e| e.filename == "hints")
+            .expect("hints entry")
+            .oid,
+    )
+    .expect("sha1 object id");
 
     let mut stack = vec![hints_oid];
     while let Some(tree) = stack.pop() {
@@ -81,7 +83,7 @@ fn hints_never_embed_a_gitlink() {
                 entry.filename
             );
             if entry.mode.kind() == EntryKind::Tree {
-                stack.push(entry.oid);
+                stack.push(Oid::new(entry.oid).expect("sha1 object id"));
             }
         }
     }
@@ -122,7 +124,7 @@ fn hints_are_reachable_from_the_storing_documents_tree() {
                 found = true;
             }
             if entry.mode.kind() == EntryKind::Tree {
-                stack.push(entry.oid);
+                stack.push(Oid::new(entry.oid).expect("sha1 object id"));
             }
         }
     }

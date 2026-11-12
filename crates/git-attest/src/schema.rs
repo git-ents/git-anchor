@@ -16,8 +16,8 @@
 //! mapping cannot reproduce.
 
 use facet::Facet;
+use git_store::{Committer, RefSegment, RefStore, Sha1, Store, Tagged, schema_of};
 use gix::objs::{Find, Write};
-use git_store::{Committer, RefSegment, RefStore, Store, schema_of};
 
 use crate::envelope::{Envelope, Target};
 use crate::error::{Error, Result};
@@ -97,7 +97,7 @@ pub(crate) fn key_segment() -> RefSegment {
 pub fn register_claim_schema<R, O>(store: &Store<R, O>) -> Result<gix::ObjectId>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     let schema = schema_of::<StoredEnvelope>()?;
     store
@@ -123,7 +123,7 @@ where
 pub fn register_key_schema<R, O>(store: &Store<R, O>) -> Result<gix::ObjectId>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     let schema = schema_of::<AttestKey>()?;
     store
@@ -145,7 +145,7 @@ where
 pub fn register_schemas<R, O>(store: &Store<R, O>) -> Result<()>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     register_claim_schema(store)?;
     register_key_schema(store)?;

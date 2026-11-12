@@ -93,7 +93,7 @@ pub struct Envelope {
 /// hashes into).
 pub fn target_key(target: &Target) -> Result<ObjectId> {
     let (oid, _objects) = normal_form::hash(&to_normal_form(target))?;
-    Ok(oid)
+    Ok(oid.into_raw())
 }
 
 /// `target` in the identity normal form's closed universe.
@@ -154,7 +154,7 @@ mod tests {
                 .into(),
         })
         .unwrap();
-        assert_eq!(key.to_string(), "3ae941b8060a8c2e5650d58a61fb8b0d8e017525");
+        assert_eq!(key.to_string(), "1ebddadb6bdfa8fa73054b425c66ea1baca5f08d");
     }
 
     /// An envelope round-trips through the general codec: it is a document,

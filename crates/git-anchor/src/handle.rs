@@ -13,6 +13,7 @@
 //! the handle's own tree.
 
 use facet_git_tree::normal_form::{self, NormalForm};
+use facet_git_tree::{Sha1, Tagged};
 use gix::ObjectId;
 use gix_object::Find;
 
@@ -39,9 +40,15 @@ impl CaptureHandle {
     /// [`crate::Binding`].
     pub fn anchor_id<F>(&self, store: &F) -> Result<AnchorId>
     where
-        F: Find + ?Sized,
+        F: Find + Tagged<Sha1> + ?Sized,
     {
         crate::binding::Binding::deserialize(self, store)?.anchor_id()
+    }
+}
+
+impl From<facet_git_tree::Oid<Sha1>> for CaptureHandle {
+    fn from(oid: facet_git_tree::Oid<Sha1>) -> Self {
+        Self(oid.into_raw())
     }
 }
 
@@ -66,6 +73,12 @@ impl From<ObjectId> for AnchorId {
 impl From<AnchorId> for ObjectId {
     fn from(id: AnchorId) -> Self {
         id.0
+    }
+}
+
+impl From<facet_git_tree::Oid<Sha1>> for AnchorId {
+    fn from(oid: facet_git_tree::Oid<Sha1>) -> Self {
+        Self(oid.into_raw())
     }
 }
 

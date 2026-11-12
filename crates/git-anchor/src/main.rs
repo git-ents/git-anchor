@@ -21,7 +21,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use facet_git_tree::{
-    Node, ObjectStore, Schema, StructField, deserialize_value_with_schema, schema_of,
+    Backend, Node, ObjectStore, Schema, deserialize_value_with_schema, schema_of,
 };
 use facet_value::{VObject, Value};
 use git_anchor::{
@@ -226,7 +226,7 @@ fn cmd_create(repo: &gix::Repository, args: CreateArgs) -> Result<()> {
         worktree,
     } = args;
     let binding = build_binding(repo, at, path, lines, worktree)?;
-    let handle = binding.serialize_into(repo)?;
+    let handle = binding.serialize_into(&Backend::new(repo))?;
     println!("{handle}");
     Ok(())
 }
@@ -234,7 +234,7 @@ fn cmd_create(repo: &gix::Repository, args: CreateArgs) -> Result<()> {
 /// `id`: the anchor id a capture handle resolves to — `identity`'s own oid,
 /// read directly off the handle's tree, invariant under any hint change.
 fn cmd_id(repo: &gix::Repository, args: IdArgs) -> Result<()> {
-    let id = args.handle.anchor_id(repo)?;
+    let id = args.handle.anchor_id(&Backend::new(repo))?;
     println!("{id}");
     Ok(())
 }
@@ -260,14 +260,14 @@ fn cmd_inject(repo: &gix::Repository, store: &RepoStore<'_>, args: InjectArgs) -
     let binding_field_name = binding_field(&schema)?;
     let fields = struct_fields(&schema)?;
 
-    let binding =
-        Binding::deserialize(&anchor, repo).with_context(|| format!("reading binding {anchor}"))?;
+    let binding = Binding::deserialize(&anchor, &Backend::new(repo))
+        .with_context(|| format!("reading binding {anchor}"))?;
 
     // Every unset `Optional`-shaped field defaults to absent; a real value
     // supplied below (json, text, or the binding) simply overwrites it.
     let mut builder = DocumentBuilder::for_schema(&schema)?;
     for (name, field) in fields {
-        if !field.has_default && matches!(resolve(&schema, &field.node), Some(Node::Optional(_))) {
+        if matches!(resolve(&schema, field), Some(Node::Optional(_))) {
             builder.set(name, Value::NULL)?;
         }
     }
@@ -297,13 +297,13 @@ fn cmd_inject(repo: &gix::Repository, store: &RepoStore<'_>, args: InjectArgs) -
     let commit = dynamic
         .write(&value)
         .message(message)
-        .anonymous_under(&group)?;
+        .by_commit_under(&group)?;
     // Publish the anchor registry ref query's `bind/5` resolves through
     // (`refs/anchors/<anchor-id>` -> the serialized binding tree), but only
     // for `Binding::Position`: that is the one shape `anchor/1` can project,
     // and every other shape would just be registry noise.
     if matches!(binding, Binding::Position(_)) {
-        let handle = binding.serialize_into(repo)?;
+        let handle = binding.serialize_into(&Backend::new(repo))?;
         repo.reference(
             format!("refs/anchors/{anchor_id}"),
             gix::ObjectId::from(handle),
@@ -442,12 +442,15 @@ fn binding_to_value(binding: &Binding) -> Result<Value> {
     let store = ObjectStore::default();
     let root = facet_git_tree::serialize_into(binding, &store).context("encoding the binding")?;
     let schema = schema_of::<Binding>().context("Binding's own schema")?;
-    deserialize_value_with_schema(&root, &schema, &store).context("re-reading the binding")
+    let checked = schema
+        .checked()
+        .context("Binding's schema is well-formed")?;
+    deserialize_value_with_schema(&root, &checked, &store).context("re-reading the binding")
 }
 
 /// `schema`'s root, resolved to its struct fields.
-fn struct_fields(schema: &Schema) -> Result<&BTreeMap<String, StructField>> {
-    match resolve(schema, &schema.root) {
+fn struct_fields(schema: &Schema) -> Result<&BTreeMap<String, Node>> {
+    match resolve(schema, schema.root()) {
         Some(Node::Struct(fields)) => Ok(fields),
         _ => bail!("kind's schema does not describe a struct document"),
     }
@@ -457,7 +460,7 @@ fn struct_fields(schema: &Schema) -> Result<&BTreeMap<String, StructField>> {
 /// it is not a `Ref`.
 fn resolve<'s>(schema: &'s Schema, node: &'s Node) -> Option<&'s Node> {
     match node {
-        Node::Ref(name) => schema.defs.get(name),
+        Node::Ref(name) => schema.defs().get(name),
         other => Some(other),
     }
 }
@@ -478,11 +481,11 @@ fn shape_is_binding(schema: &Schema, node: &Node, binding: &Node) -> bool {
 fn binding_field(schema: &Schema) -> Result<String> {
     let canonical = schema_of::<Binding>().context("Binding's own schema")?;
     let canonical_root =
-        resolve(&canonical, &canonical.root).context("Binding's root does not resolve")?;
+        resolve(&canonical, canonical.root()).context("Binding's root does not resolve")?;
     let fields = struct_fields(schema)?;
     let matches: Vec<&String> = fields
         .iter()
-        .filter(|(_, field)| shape_is_binding(schema, &field.node, canonical_root))
+        .filter(|(_, field)| shape_is_binding(schema, field, canonical_root))
         .map(|(name, _)| name)
         .collect();
     match matches.as_slice() {
@@ -496,19 +499,17 @@ fn binding_field(schema: &Schema) -> Result<String> {
 }
 
 /// The one field, among `fields` excluding `binding_field`, that is required
-/// (not `Optional`, no default) and shaped `Node::String` — `inject`'s
-/// positional argument fills exactly this field, when exactly one exists.
+/// (not `Optional`) and shaped `Node::String` — `inject`'s positional argument
+/// fills exactly this field, when exactly one exists.
 fn unique_string_field(
     schema: &Schema,
-    fields: &BTreeMap<String, StructField>,
+    fields: &BTreeMap<String, Node>,
     binding_field: &str,
 ) -> Result<String> {
     let candidates: Vec<&String> = fields
         .iter()
         .filter(|(name, field)| {
-            name.as_str() != binding_field
-                && !field.has_default
-                && matches!(resolve(schema, &field.node), Some(Node::String))
+            name.as_str() != binding_field && matches!(resolve(schema, field), Some(Node::String))
         })
         .map(|(name, _)| name)
         .collect();

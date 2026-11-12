@@ -170,7 +170,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use facet_git_tree::ObjectStore;
-    use gix_object::{Data, Tree, Write as _, WriteTo, tree};
+    use gix_object::{Data, Tree, WriteTo, tree};
     use proptest::prelude::*;
 
     use super::*;
@@ -182,7 +182,10 @@ mod tests {
     }
 
     fn write_blob(store: &ObjectStore, content: &[u8]) -> ObjectId {
-        store.write_buf(Kind::Blob, content).expect("write blob")
+        store
+            .write_buf(Kind::Blob, content)
+            .expect("write blob")
+            .into_raw()
     }
 
     /// Build a tree object from `entries` (already-known name/id/mode
@@ -199,7 +202,10 @@ mod tests {
                 .collect(),
         };
         tree.entries.sort();
-        store.write(&tree as &dyn WriteTo).expect("write tree")
+        store
+            .write(&tree as &dyn WriteTo)
+            .expect("write tree")
+            .into_raw()
     }
 
     /// Write a tree holding one blob per `path -> content` entry (all paths

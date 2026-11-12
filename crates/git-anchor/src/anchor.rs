@@ -502,7 +502,7 @@ mod tests {
         let id = crate::handle::hash_identity(&identity).unwrap();
         assert_eq!(
             id.to_string(),
-            "8e50840508db65f7296d8cbedaee54a042efe948",
+            "7d2884d1a44281adbdc4072e9c5e98bca4f26ea9",
             "hard-coded against the frozen identity normal form mapping"
         );
     }

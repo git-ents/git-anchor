@@ -6,8 +6,9 @@
 //! registration — no envelope, no signing, no chaining.
 
 use facet::Facet;
-use gix_object::{Find, Write};
+use facet_git_tree::{Sha1, Tagged};
 use git_store::{Committer, RefSegment, RefStore, Store, schema_of};
+use gix_object::{Find, Write};
 
 use crate::error::{Error, Result};
 use crate::oid::Oid;
@@ -42,7 +43,7 @@ pub struct RebindPin {
 pub fn register_rebind_pin_schema<R, O>(store: &Store<R, O>) -> Result<gix::ObjectId>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     let segment = RefSegment::new(REBIND_PIN_KIND)
         .map_err(|error| Error::SchemaRegistration(error.to_string()))?;
@@ -59,7 +60,7 @@ where
 mod tests {
     #![allow(clippy::unwrap_used, reason = "unit test")]
 
-    use git_store::{MemoryRefStore, ObjectId as StoreObjectId, RefSegment, Store};
+    use git_store::{MemoryRefStore, RefSegment, Store};
 
     use super::*;
     use crate::fixture::empty_store;
@@ -105,7 +106,7 @@ mod tests {
             path: "src/refdb/store.rs".to_owned(),
             span: (118, 568),
         };
-        let root: StoreObjectId = facet_git_tree::serialize_into(&pin, store.objects()).unwrap();
+        let root = facet_git_tree::serialize_into(&pin, store.objects()).unwrap();
         let back: RebindPin = facet_git_tree::deserialize(&root, store.objects()).unwrap();
         assert_eq!(back, pin);
     }

@@ -61,6 +61,10 @@ pub enum Error {
     /// the write was given, or a name the frozen mapping cannot express.
     #[error(transparent)]
     NormalForm(#[from] facet_git_tree::NormalFormError),
+    /// A capture handle names an object id that is not sha1, so the binding
+    /// codec cannot address it.
+    #[error(transparent)]
+    HashFormat(#[from] facet_git_tree::HashFormatMismatch),
     /// [`crate::register_rebind_pin_schema`] could not register the
     /// `rebind pin` payload schema.
     #[error("registering the rebind-pin schema failed: {0}")]

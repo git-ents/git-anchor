@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 
 use facet::Facet;
 use facet_git_tree::normal_form::NormalForm;
+use facet_git_tree::{Sha1, Tagged};
 use gix::ObjectId;
 use gix_object::{Find, Write};
 
@@ -281,10 +282,10 @@ impl Binding {
     /// locates it — not itself identity-bearing; read [`CaptureHandle::anchor_id`]
     /// for the value that is.
     ///
-    /// `store` takes the same bound `facet_git_tree::serialize_into` does:
-    /// any `gix` object-write sink — a real repository's object database,
-    /// an in-memory [`facet_git_tree::ObjectStore`], or any other
-    /// `gix_object::Write` implementation.
+    /// `store` takes the same bound `facet_git_tree::serialize_into` does: a
+    /// `gix` object-write sink that claims its hash format — an in-memory
+    /// [`facet_git_tree::ObjectStore`], or a `gix` object database wrapped in
+    /// a [`facet_git_tree::Backend`].
     ///
     /// # Examples
     ///
@@ -310,7 +311,7 @@ impl Binding {
     /// (a backend error from `store`).
     pub fn serialize_into<W>(&self, store: &W) -> Result<CaptureHandle>
     where
-        W: Write + ?Sized,
+        W: Write + Tagged<Sha1> + ?Sized,
     {
         let oid = facet_git_tree::serialize_into(self, store)?;
         Ok(CaptureHandle::from(oid))
@@ -318,20 +319,19 @@ impl Binding {
 
     /// Read the [`Binding`] a [`CaptureHandle`] locates in `store`.
     ///
-    /// `store` takes the same bound `facet_git_tree::deserialize` does:
-    /// any `gix` object-read source.
+    /// `store` takes the same bound `facet_git_tree::deserialize` does: a
+    /// `gix` object-read source claiming its hash format.
     ///
     /// # Errors
     ///
-    /// [`Error::Deserialize`] when `handle` does not decode as a [`Binding`].
+    /// [`Error::Deserialize`] when `handle` does not decode as a [`Binding`],
+    /// and [`Error::HashFormat`] when `handle` is not sha1.
     pub fn deserialize<F>(handle: &CaptureHandle, store: &F) -> Result<Self>
     where
-        F: Find + ?Sized,
+        F: Find + Tagged<Sha1> + ?Sized,
     {
-        Ok(facet_git_tree::deserialize(
-            &ObjectId::from(*handle),
-            store,
-        )?)
+        let root = facet_git_tree::Oid::<Sha1>::new(ObjectId::from(*handle))?;
+        Ok(facet_git_tree::deserialize(&root, store)?)
     }
 }
 

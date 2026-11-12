@@ -13,8 +13,8 @@ use std::path::Path;
 use std::process::Command;
 
 use git_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
+use git_store::RepoStore;
 use gix_refstore::{SignatureBytes, Signer};
-use git_store::{GixRefStore, Store};
 
 /// A signer standing in for `ssh-keygen -Y sign`: the store carries whatever
 /// bytes it is handed, and this phase has no crypto to hand it. The *shape*
@@ -66,7 +66,7 @@ fn a_claim_is_a_plain_commit_stock_git_reads() {
     let dir = tempfile::tempdir().unwrap();
     test_support::init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
-    let store = Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout());
+    let store = RepoStore::open_with_layout(&repo, layout());
     register_claim_schema(&store).unwrap();
 
     let claims = Claims::open(&store);
@@ -103,7 +103,7 @@ fn a_claim_is_a_plain_commit_stock_git_reads() {
         "a claim's parent is the tip it was written over"
     );
 
-    // The tree is store's ordinary `{value/, schema/}` document tree, walkable
+    // The tree is store's ordinary `.schema`-enveloped document tree, walkable
     // with plumbing: nothing about a claim tree is special.
     let tree = git(
         dir.path(),
@@ -113,13 +113,23 @@ fn a_claim_is_a_plain_commit_stock_git_reads() {
         .lines()
         .map(|line| line.rsplit('\t').next().unwrap())
         .collect();
-    assert_eq!(names, vec!["schema", "value"]);
+    assert_eq!(
+        names,
+        vec![
+            ".schema",
+            "key",
+            "payload",
+            "payload_kind",
+            "sequence",
+            "target"
+        ]
+    );
 
     // Every envelope field is a blob `git cat-file` prints as text.
     assert_eq!(
         git(
             dir.path(),
-            &["cat-file", "-p", &format!("{second}:value/payload_kind")]
+            &["cat-file", "-p", &format!("{second}:payload_kind")]
         )
         .trim(),
         "review"
@@ -127,7 +137,7 @@ fn a_claim_is_a_plain_commit_stock_git_reads() {
     assert_eq!(
         git(
             dir.path(),
-            &["cat-file", "-p", &format!("{second}:value/target/kind")]
+            &["cat-file", "-p", &format!("{second}:target/kind")]
         )
         .trim(),
         "anchor"
@@ -159,8 +169,7 @@ fn a_signed_claim_carries_its_signature_in_the_gpgsig_header() {
     let dir = tempfile::tempdir().unwrap();
     test_support::init_repo(dir.path());
     let repo = gix::open(dir.path()).unwrap();
-    let store =
-        Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout()).with_signer(FakeArmor);
+    let store = RepoStore::open_with_layout(&repo, layout()).with_signer(FakeArmor);
     register_claim_schema(&store).unwrap();
 
     let claim = Claims::open(&store)
@@ -178,15 +187,18 @@ fn a_signed_claim_carries_its_signature_in_the_gpgsig_header() {
         "one armored block, opened and closed: {raw}"
     );
     assert!(
-        git(dir.path(), &["cat-file", "-p", &format!("{claim}:value")])
-            .lines()
-            .all(|line| !line.contains("gpgsig")),
+        git(
+            dir.path(),
+            &["cat-file", "-p", &format!("{claim}^{{tree}}")]
+        )
+        .lines()
+        .all(|line| !line.contains("gpgsig")),
         "the signature is on the commit, not in the tree"
     );
 
     // Unsigned claims stay unsigned: the signer is a property of the store,
     // and attest contributes no signing code of its own either way.
-    let plain = Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout());
+    let plain = RepoStore::open_with_layout(&repo, layout());
     let plain_claim = Claims::open(&plain)
         .sign(&envelope("commit", "unsigned"))
         .unwrap();

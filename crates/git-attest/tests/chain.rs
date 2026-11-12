@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 
 use git_attest::{Claims, Envelope, Target, layout, register_claim_schema, target_key};
-use git_store::{GixRefStore, Store};
+use git_store::RepoStore;
 
 const WRITERS: usize = 4;
 const CLAIMS_EACH: usize = 4;
@@ -57,7 +57,7 @@ fn concurrent_claims_on_one_target_all_land_on_one_unforked_chain() {
     test_support::init_repo(dir.path());
     {
         let repo = gix::open(dir.path()).unwrap();
-        let store = Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout());
+        let store = RepoStore::open_with_layout(&repo, layout());
         register_claim_schema(&store).unwrap();
     }
 
@@ -68,7 +68,7 @@ fn concurrent_claims_on_one_target_all_land_on_one_unforked_chain() {
             let path = dir.path();
             scope.spawn(move || {
                 let repo = gix::open(path).unwrap();
-                let store = Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout());
+                let store = RepoStore::open_with_layout(&repo, layout());
                 let claims = Claims::open(&store);
                 for n in 0..CLAIMS_EACH {
                     claims
@@ -111,7 +111,7 @@ fn concurrent_claims_on_one_target_all_land_on_one_unforked_chain() {
         .map(|id| {
             git(
                 dir.path(),
-                &["cat-file", "-p", &format!("{id}:value/payload_kind")],
+                &["cat-file", "-p", &format!("{id}:payload_kind")],
             )
             .trim()
             .to_owned()
@@ -123,7 +123,7 @@ fn concurrent_claims_on_one_target_all_land_on_one_unforked_chain() {
 
     // Read back through the library, the same chain comes out newest-first.
     let repo = gix::open(dir.path()).unwrap();
-    let store = Store::with_layout(GixRefStore::new(&repo), &repo.objects, layout());
+    let store = RepoStore::open_with_layout(&repo, layout());
     let log: Vec<String> = Claims::open(&store)
         .log(&target())
         .unwrap()

@@ -22,9 +22,9 @@
 //! key-add at all is policy, and cryptography has nothing to say about it.
 
 use facet::Facet;
+use git_store::{Committer, RefStore, Sha1, Tagged};
 use gix::ObjectId;
 use gix::objs::{Find, Write};
-use git_store::{Committer, RefStore};
 
 use crate::chain::{Claims, KEY_TARGET_KIND};
 use crate::error::{Error, Result};
@@ -108,7 +108,7 @@ pub(crate) enum Resolved {
 impl<R, O> Claims<'_, R, O>
 where
     R: RefStore + Committer,
-    O: Find + Write,
+    O: Find + Write + Tagged<Sha1>,
 {
     /// Publish `key` as a key-add claim, the root of its own key chain, and
     /// return the claim id — the value
